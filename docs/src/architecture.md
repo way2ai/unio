@@ -50,5 +50,7 @@ user
 
 - Keep model calls, tool execution, and persistence out of the CLI.
 - Route every risky operation through the security policy.
+- Resolve model configuration in the model crate from `~/.unio/config.toml`,
+  with environment variables as higher-precedence overrides.
 - Make local development possible with the mock provider.
 - Prefer explicit IDs for sessions, runs, agents, and traces.

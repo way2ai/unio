@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, RwLock};
@@ -161,7 +161,6 @@ async fn run_prompt_or_slash(prompt: String) -> anyhow::Result<()> {
 
     match trimmed {
         "/skills" => run_skills(),
-        "/model" | "/models" => run_models().await,
         "/approval" | "/approvals" => run_approvals(None).await,
         "/update" => run_update(),
         "?" | "/?" => {
@@ -169,6 +168,9 @@ async fn run_prompt_or_slash(prompt: String) -> anyhow::Result<()> {
             Ok(())
         }
         _ => {
+            if parse_model_slash(trimmed).is_some() {
+                return run_model_config().await;
+            }
             run_exec(
                 prompt,
                 PermissionMode::Default,
@@ -209,6 +211,7 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
     let mut selected_file_suggestion = 0_usize;
     let mut selected_slash_suggestion = 0_usize;
     let mut messages = Vec::<String>::new();
+    let mut model_config_wizard: Option<ModelConfigWizard> = None;
     let file_index = FileReferenceIndex::start(workspace.clone());
 
     loop {
@@ -229,7 +232,13 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
         );
         let welcome_right = tui_welcome_right(messages.last().map(String::as_str));
         let message_lines = tui_message_lines(&messages);
-        let input_line = tui_input_line(input.as_str(), input.cursor());
+        let input_line = tui_input_line(
+            input.as_str(),
+            input.cursor(),
+            model_config_wizard
+                .as_ref()
+                .map(ModelConfigWizard::input_placeholder),
+        );
         let help_lines = tui_bottom_hints(
             input_before_cursor,
             ctrl_c_armed,
@@ -237,6 +246,7 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
             selected_file_suggestion,
             &slash_suggestions,
             selected_slash_suggestion,
+            model_config_wizard.as_ref(),
         );
 
         terminal.draw(|frame| {
@@ -437,6 +447,25 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                 }
                 let prompt = input.as_str().trim().to_string();
                 input.clear();
+                if let Some(mut wizard) = model_config_wizard.take() {
+                    match wizard.accept(&prompt)? {
+                        Some(finished) => {
+                            let path = write_finished_model_config(finished)?;
+                            let models = fetch_models(&client).await?;
+                            messages.push(format!(
+                                "system: model config\nupdated: {}\n{}",
+                                path.display(),
+                                format_models_status(&models)
+                            ));
+                            status = fetch_status(&client).await?;
+                        }
+                        None => {
+                            messages.push(format!("system: model config\n{}", wizard.prompt()));
+                            model_config_wizard = Some(wizard);
+                        }
+                    }
+                    continue;
+                }
                 if prompt.is_empty() {
                     continue;
                 }
@@ -456,9 +485,15 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                     messages.push(format!("system: skills\n{}", discovered_skills_text()?));
                     continue;
                 }
-                if prompt == "/model" || prompt == "/models" {
+                if parse_model_slash(&prompt).is_some() {
+                    let wizard = start_model_config_wizard()?;
                     let models = fetch_models(&client).await?;
-                    messages.push(format!("system: model\n{}", format_models_status(&models)));
+                    messages.push(format!(
+                        "system: model\n{}\n\n{}",
+                        format_models_status(&models),
+                        wizard.prompt()
+                    ));
+                    model_config_wizard = Some(wizard);
                     continue;
                 }
                 if prompt == "/update" {
@@ -510,7 +545,7 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                         messages.push(format!(
                             "assistant: {}\n\n{}",
                             response.completed.final_text,
-                            exec_metadata(&response)
+                            format_exec_summary(&response)
                         ));
                         match query_trace(&client, trace_id, None).await {
                             Ok(trace) => messages.push(format_trace_timeline(&trace)),
@@ -612,7 +647,7 @@ fn tui_welcome_right(recent: Option<&str>) -> Vec<Line<'static>> {
             ),
         ]),
         Line::from("  Run /skills to inspect discovered skills."),
-        Line::from("  Run /model to view the active provider and fallback state."),
+        Line::from("  Run /model to configure or switch the active provider."),
         Line::from("  Use /approval, then a or d, to resolve pending tool requests."),
         Line::from(Span::styled(
             "  ------------------------------------------------------------",
@@ -778,13 +813,13 @@ fn previous_char_boundary(value: &str, cursor: usize) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn tui_input_line(input: &str, cursor: usize) -> Line<'static> {
+fn tui_input_line(input: &str, cursor: usize, placeholder: Option<String>) -> Line<'static> {
     if input.is_empty() {
         return Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::White)),
             Span::styled("|", Style::default().fg(tui_accent())),
             Span::styled(
-                " Try \"explain this repo\" or /skills",
+                placeholder.unwrap_or_else(|| " Try \"explain this repo\" or /skills".into()),
                 tui_muted().add_modifier(Modifier::ITALIC),
             ),
         ]);
@@ -880,11 +915,7 @@ const SLASH_COMMAND_HINTS: &[SlashCommandHint] = &[
     },
     SlashCommandHint {
         name: "/model",
-        usage: "show provider",
-    },
-    SlashCommandHint {
-        name: "/models",
-        usage: "show provider",
+        usage: "configure model",
     },
     SlashCommandHint {
         name: "/approval",
@@ -955,6 +986,7 @@ fn tui_bottom_hints(
     selected_file_suggestion: usize,
     slash_suggestions: &[SlashCommandHint],
     selected_slash_suggestion: usize,
+    model_config_wizard: Option<&ModelConfigWizard>,
 ) -> Vec<Line<'static>> {
     if ctrl_c_armed {
         return vec![
@@ -964,6 +996,9 @@ fn tui_bottom_hints(
             ]),
             Line::from(Span::styled("press any other key to continue", tui_muted())),
         ];
+    }
+    if let Some(wizard) = model_config_wizard {
+        return tui_model_config_hints(wizard);
     }
     if !file_suggestions.is_empty() {
         return tui_file_suggestion_hints(file_suggestions, selected_file_suggestion);
@@ -1019,6 +1054,26 @@ fn tui_default_hints() -> Vec<Line<'static>> {
             Span::raw("     "),
             Span::styled("? ", Style::default().fg(Color::White)),
             Span::styled("for help", tui_muted()),
+        ]),
+    ]
+}
+
+fn tui_model_config_hints(wizard: &ModelConfigWizard) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled("/model ", Style::default().fg(tui_accent())),
+            Span::styled(wizard.step_label(), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled("Enter ", Style::default().fg(Color::White)),
+            Span::styled("keeps the shown default", tui_muted()),
+        ]),
+        Line::from(Span::styled(wizard.selection_hint(), tui_muted())),
+        Line::from(vec![
+            Span::styled("ctrl+u ", Style::default().fg(Color::White)),
+            Span::styled("clear input", tui_muted()),
+            Span::raw("     "),
+            Span::styled("ctrl+c twice ", Style::default().fg(Color::White)),
+            Span::styled("exit", tui_muted()),
         ]),
     ]
 }
@@ -1494,7 +1549,7 @@ fn format_file_references(references: &[String]) -> String {
 
 fn print_slash_help() {
     println!("/skills    list discovered skills");
-    println!("/model     show active model provider");
+    println!("/model     configure and select model");
     println!("/resume [n] show latest session transcript");
     println!("/approval  show pending approvals");
     println!("/trace <id> [run_id] show trace events");
@@ -1531,6 +1586,203 @@ fn parse_approval_slash(input: &str) -> Option<(bool, String)> {
                 .map(|id| (false, id.trim().to_string()))
         })
         .filter(|(_, id)| !id.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelSwitch {
+    provider: String,
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelConfigWizard {
+    step: ModelConfigStep,
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    api_key_update: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelConfigStep {
+    Provider,
+    Model,
+    BaseUrl,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FinishedModelConfig {
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key_update: Option<String>,
+}
+
+impl ModelConfigWizard {
+    fn from_config(config: &toml::Value) -> Self {
+        let existing = config.get("model");
+        let provider = existing
+            .and_then(|model| model.get("provider"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("mock")
+            .to_string();
+        let model = existing
+            .and_then(|model| model.get("model"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| default_model_for_provider(&provider))
+            .to_string();
+        let base_url = existing
+            .and_then(|model| model.get("base_url"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let api_key = existing
+            .and_then(|model| model.get("api_key"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        Self {
+            step: ModelConfigStep::Provider,
+            provider,
+            model,
+            base_url,
+            api_key,
+            api_key_update: None,
+        }
+    }
+
+    fn prompt(&self) -> String {
+        match self.step {
+            ModelConfigStep::Provider => format!(
+                "Model setup 1/4 - provider [{}] (openai-compatible, anthropic, mock)",
+                self.provider
+            ),
+            ModelConfigStep::Model => format!("Model setup 2/4 - model [{}]", self.model),
+            ModelConfigStep::BaseUrl if self.base_url.is_empty() => {
+                "Model setup 3/4 - base_url [empty]".into()
+            }
+            ModelConfigStep::BaseUrl => {
+                format!("Model setup 3/4 - base_url [{}]", self.base_url)
+            }
+            ModelConfigStep::ApiKey if self.api_key.is_empty() => {
+                "Model setup 4/4 - api_key [empty]".into()
+            }
+            ModelConfigStep::ApiKey => {
+                "Model setup 4/4 - api_key [keep existing; enter '-' to clear]".into()
+            }
+        }
+    }
+
+    fn input_placeholder(&self) -> String {
+        format!(" {}", self.prompt())
+    }
+
+    fn step_label(&self) -> &'static str {
+        match self.step {
+            ModelConfigStep::Provider => "choose provider",
+            ModelConfigStep::Model => "choose model",
+            ModelConfigStep::BaseUrl => "set base URL",
+            ModelConfigStep::ApiKey => "set API key",
+        }
+    }
+
+    fn selection_hint(&self) -> &'static str {
+        match self.step {
+            ModelConfigStep::Provider => {
+                "Type openai-compatible, anthropic, or mock. Enter keeps current."
+            }
+            ModelConfigStep::Model => "Type a model name. Enter keeps current.",
+            ModelConfigStep::BaseUrl => "Type a base URL, or Enter to keep/leave empty.",
+            ModelConfigStep::ApiKey => "Type a key, Enter keeps existing, '-' clears it.",
+        }
+    }
+
+    fn accept(&mut self, input: &str) -> anyhow::Result<Option<FinishedModelConfig>> {
+        let value = input.trim();
+        match self.step {
+            ModelConfigStep::Provider => {
+                let provider = if value.is_empty() {
+                    self.provider.clone()
+                } else {
+                    value.to_string()
+                };
+                if !is_supported_model_provider(&provider) {
+                    anyhow::bail!(
+                        "unsupported provider: {provider}; use openai, openai-compatible, anthropic, or mock"
+                    );
+                }
+                self.provider = provider;
+                if self.model == "mock" {
+                    self.model = default_model_for_provider(&self.provider).into();
+                }
+                self.step = ModelConfigStep::Model;
+                Ok(None)
+            }
+            ModelConfigStep::Model => {
+                self.model = if value.is_empty() {
+                    self.model.clone()
+                } else {
+                    value.to_string()
+                };
+                self.step = ModelConfigStep::BaseUrl;
+                Ok(None)
+            }
+            ModelConfigStep::BaseUrl => {
+                self.base_url = if value.is_empty() {
+                    self.base_url.clone()
+                } else {
+                    value.to_string()
+                };
+                self.step = ModelConfigStep::ApiKey;
+                Ok(None)
+            }
+            ModelConfigStep::ApiKey => {
+                self.api_key_update = if value == "-" {
+                    Some(String::new())
+                } else if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+                Ok(Some(FinishedModelConfig {
+                    provider: self.provider.clone(),
+                    model: self.model.clone(),
+                    base_url: self.base_url.clone(),
+                    api_key_update: self.api_key_update.clone(),
+                }))
+            }
+        }
+    }
+}
+
+impl FinishedModelConfig {
+    fn apply_to_config(&self, config: &mut toml::Value) -> anyhow::Result<()> {
+        apply_model_switch_to_config(
+            config,
+            &ModelSwitch {
+                provider: self.provider.clone(),
+                model: Some(self.model.clone()),
+            },
+        )?;
+        set_optional_model_config_value(config, "base_url", self.base_url.clone())?;
+        if let Some(api_key) = &self.api_key_update {
+            set_optional_model_config_value(config, "api_key", api_key.clone())?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_model_slash(input: &str) -> Option<()> {
+    (input.trim() == "/model").then_some(())
+}
+
+fn is_supported_model_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "openai" | "openai-compatible" | "anthropic" | "mock"
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1575,7 +1827,7 @@ async fn submit_exec(
 fn print_exec_response(response: &ExecTurnResponse, output: ExecOutputMode) {
     println!("{}", response.completed.final_text);
     if !output.quiet {
-        println!("{}", exec_metadata(response));
+        println!("{}", format_exec_summary(response));
     }
     if response.completed.stage == RunStage::WaitingApproval {
         println!(
@@ -1584,26 +1836,80 @@ fn print_exec_response(response: &ExecTurnResponse, output: ExecOutputMode) {
     }
 }
 
-fn exec_metadata(response: &ExecTurnResponse) -> String {
+fn format_exec_summary(response: &ExecTurnResponse) -> String {
     let mut lines = vec![
-        format!("stage: {:?}", response.completed.stage),
-        format!("run: {}", response.completed.run_id),
-        format!("trace: {}", response.completed.trace_id),
         format!(
-            "model: {} / {}",
-            response.completed.provider, response.completed.model
+            "Done {:?}  {} / {}",
+            response.completed.stage, response.completed.provider, response.completed.model
         ),
         format!(
-            "tokens: input={} output={} context_ratio={:.3}",
+            "Run {}  Trace {}",
+            response.completed.run_id, response.completed.trace_id
+        ),
+        format!(
+            "Tokens input={} output={} context_ratio={:.3}",
             response.completed.input_tokens,
             response.completed.output_tokens,
             response.completed.context_ratio
         ),
     ];
-    if !response.completed.events.is_empty() {
-        lines.push(format!("events: {}", response.completed.events.join(", ")));
+    let event_lines = response
+        .completed
+        .events
+        .iter()
+        .map(|event| friendly_event_line(event, ""))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if !event_lines.is_empty() {
+        lines.push("Activity".into());
+        lines.extend(event_lines);
     }
     lines.join("\n")
+}
+
+fn friendly_event_line(kind: &str, message: &str) -> String {
+    let label = friendly_event_label(kind);
+    if label.is_empty() {
+        return String::new();
+    }
+    if message.trim().is_empty() {
+        label.into()
+    } else {
+        format!("{label} {}", friendly_event_message(message))
+    }
+}
+
+fn friendly_event_label(kind: &str) -> &'static str {
+    match kind {
+        "tool.started" => "Tool started",
+        "tool.completed" => "Tool completed",
+        "tool.approval_required" | "approval.requested" => "Approval required",
+        "tool.denied" => "Tool denied",
+        "tool.failed" => "Tool failed",
+        "skill.started" => "Skill started",
+        "skill.completed" => "Skill completed",
+        "skill.waiting_approval" => "Skill awaiting approval",
+        "skill.denied" => "Skill denied",
+        "skill.failed" => "Skill failed",
+        "approval.resolved" => "Approval resolved",
+        "context.budget" => "Context budget",
+        "context.compaction_required" => "Context compaction required",
+        "planning.completed" => "Planning completed",
+        "sub_agent.completed" => "Sub-agent completed",
+        "run.completed" | "root_agent.completed" => "",
+        _ if kind.contains("approval") => "Approval",
+        _ if kind.contains("skill") => "Skill",
+        _ if kind.contains("tool") => "Tool",
+        _ if kind.contains("context") => "Context",
+        _ => "",
+    }
+}
+
+fn friendly_event_message(message: &str) -> String {
+    message
+        .trim()
+        .replace("skill-tool:", "skill ")
+        .replace("skill-tool", "skill")
 }
 
 async fn run_resume(session_id: Option<String>, limit: Option<usize>) -> anyhow::Result<()> {
@@ -1746,6 +2052,15 @@ async fn run_models() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_model_config() -> anyhow::Result<()> {
+    let client = daemon_client(true).await?;
+    let status = fetch_models(&client).await?;
+    println!("{}", format_models_status(&status));
+    let path = write_prompted_model_config()?;
+    println!("updated: {}", path.display());
+    run_models().await
+}
+
 async fn fetch_models(client: &DaemonClient) -> anyhow::Result<ModelsStatus> {
     Ok(client
         .get(format!("{}/models", client.base_url))
@@ -1765,6 +2080,172 @@ fn format_models_status(status: &ModelsStatus) -> String {
         format!("fallback_to_mock: {}", status.fallback_to_mock),
     ]
     .join("\n")
+}
+
+fn start_model_config_wizard() -> anyhow::Result<ModelConfigWizard> {
+    let paths = UserPaths::current()?;
+    let path = paths.root.join("config.toml");
+    let config = read_unio_config(&path)?;
+    Ok(ModelConfigWizard::from_config(&config))
+}
+
+fn write_finished_model_config(config_update: FinishedModelConfig) -> anyhow::Result<PathBuf> {
+    let paths = UserPaths::current()?;
+    paths.ensure()?;
+    let path = paths.root.join("config.toml");
+    let mut config = read_unio_config(&path)?;
+    config_update.apply_to_config(&mut config)?;
+    std::fs::write(&path, toml::to_string_pretty(&config)?)?;
+    Ok(path)
+}
+
+fn write_prompted_model_config() -> anyhow::Result<PathBuf> {
+    let paths = UserPaths::current()?;
+    paths.ensure()?;
+    let path = paths.root.join("config.toml");
+    let mut config = read_unio_config(&path)?;
+    let existing = config.get("model");
+
+    let current_provider = existing
+        .and_then(|model| model.get("provider"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("mock")
+        .to_string();
+    let current_model = existing
+        .and_then(|model| model.get("model"))
+        .and_then(toml::Value::as_str)
+        .map(ToOwned::to_owned);
+    let current_base_url = existing
+        .and_then(|model| model.get("base_url"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let current_api_key = existing
+        .and_then(|model| model.get("api_key"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let provider = prompt_with_default("provider", &current_provider)?;
+    if !is_supported_model_provider(&provider) {
+        anyhow::bail!(
+            "unsupported provider: {provider}; use openai, openai-compatible, anthropic, or mock"
+        );
+    }
+
+    let default_model = default_model_for_provider(&provider);
+    let current_model = current_model.as_deref().unwrap_or(default_model);
+    let model = prompt_with_default("model", current_model)?;
+    let model_switch = ModelSwitch {
+        provider,
+        model: Some(model),
+    };
+    apply_model_switch_to_config(&mut config, &model_switch)?;
+
+    let base_url = prompt_with_default("base_url", &current_base_url)?;
+    set_optional_model_config_value(&mut config, "base_url", base_url)?;
+
+    let api_key_prompt = if current_api_key.is_empty() {
+        "api_key"
+    } else {
+        "api_key (Enter keeps existing, '-' clears)"
+    };
+    let api_key = prompt_with_default(api_key_prompt, "")?;
+    if api_key == "-" {
+        set_optional_model_config_value(&mut config, "api_key", String::new())?;
+    } else if !api_key.is_empty() {
+        set_optional_model_config_value(&mut config, "api_key", api_key)?;
+    }
+
+    std::fs::write(&path, toml::to_string_pretty(&config)?)?;
+    Ok(path)
+}
+
+fn read_unio_config(path: &Path) -> anyhow::Result<toml::Value> {
+    if !path.exists() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+}
+
+fn apply_model_switch_to_config(
+    config: &mut toml::Value,
+    model_switch: &ModelSwitch,
+) -> anyhow::Result<()> {
+    let model_table = model_config_table_mut(config)?;
+    model_table.insert(
+        "provider".into(),
+        toml::Value::String(model_switch.provider.clone()),
+    );
+    model_table.insert(
+        "model".into(),
+        toml::Value::String(
+            model_switch
+                .model
+                .clone()
+                .unwrap_or_else(|| default_model_for_provider(&model_switch.provider).into()),
+        ),
+    );
+    Ok(())
+}
+
+fn set_optional_model_config_value(
+    config: &mut toml::Value,
+    key: &str,
+    value: String,
+) -> anyhow::Result<()> {
+    let model_table = model_config_table_mut(config)?;
+    if value.trim().is_empty() {
+        model_table.remove(key);
+    } else {
+        model_table.insert(key.into(), toml::Value::String(value));
+    }
+    Ok(())
+}
+
+fn model_config_table_mut(
+    config: &mut toml::Value,
+) -> anyhow::Result<&mut toml::map::Map<String, toml::Value>> {
+    if !config.is_table() {
+        *config = toml::Value::Table(toml::map::Map::new());
+    }
+    let root = config
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
+    let model = root
+        .entry("model")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !model.is_table() {
+        *model = toml::Value::Table(toml::map::Map::new());
+    }
+    model
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("model config must be a TOML table"))
+}
+
+fn default_model_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "openai" | "openai-compatible" => "gpt-4o-mini",
+        "anthropic" => "claude-3-5-sonnet-latest",
+        _ => "mock",
+    }
+}
+
+fn prompt_with_default(label: &str, default: &str) -> anyhow::Result<String> {
+    if default.is_empty() {
+        print!("{label}: ");
+    } else {
+        print!("{label} [{default}]: ");
+    }
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let value = input.trim().to_string();
+    if value.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(value)
+    }
 }
 
 async fn run_status() -> anyhow::Result<()> {
@@ -1908,7 +2389,7 @@ fn format_trace_timeline(response: &TraceLookupResponse) -> String {
     if response.events.is_empty() {
         return format!("timeline: {} has no events", response.trace_id);
     }
-    let mut lines = vec![format!("timeline: {}", response.trace_id)];
+    let mut lines = vec![format!("Run timeline {}", response.trace_id)];
     for event in response
         .events
         .iter()
@@ -1918,24 +2399,18 @@ fn format_trace_timeline(response: &TraceLookupResponse) -> String {
         .into_iter()
         .rev()
     {
-        let marker = if event.token_usage.is_some() || event.kind.contains("context") {
-            "context"
-        } else if event.kind.contains("approval") {
-            "approval"
-        } else if event.kind.contains("tool") || event.kind.contains("skill") {
-            "tool"
-        } else {
-            "run"
-        };
-        let mut line = format!("[{marker}] {}", event.kind);
+        let mut line = friendly_event_line(&event.kind, &event.message);
+        if line.is_empty() {
+            line = friendly_event_message(&event.message);
+        }
+        if line.is_empty() {
+            continue;
+        }
         if let Some(usage) = &event.token_usage {
             line.push_str(&format!(
                 " input={} output={} ratio={:.3}",
                 usage.input_tokens, usage.output_tokens, usage.context_ratio
             ));
-        }
-        if !event.message.is_empty() {
-            line.push_str(&format!(" - {}", event.message));
         }
         lines.push(line);
     }
@@ -1982,17 +2457,27 @@ async fn execute_tool_request(
 }
 
 fn format_tool_execution_response(response: ToolExecuteResponse) -> String {
-    let mut lines = vec![format!("status: {}", response.status)];
+    let mut lines = vec![friendly_tool_status(&response.status).to_string()];
     if let Some(approval_id) = response.approval_id {
-        lines.push(format!("approval_id: {approval_id}"));
+        lines.push(format!("Approval {approval_id}"));
     }
     if let Some(reason) = response.reason {
-        lines.push(format!("reason: {reason}"));
+        lines.push(format!("Reason {reason}"));
     }
     if let Some(content) = response.content {
         lines.push(content);
     }
     lines.join("\n")
+}
+
+fn friendly_tool_status(status: &str) -> &'static str {
+    match status {
+        "completed" => "Tool completed",
+        "approval_required" => "Approval required",
+        "denied" => "Tool denied",
+        "failed" => "Tool failed",
+        _ => "Tool",
+    }
 }
 
 async fn run_approvals(command: Option<ApprovalCommand>) -> anyhow::Result<()> {
@@ -2331,15 +2816,16 @@ fn parse_tool_args(value: &str) -> anyhow::Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_file_reference_query, complete_file_reference, configured_latest_version,
-        exec_metadata, format_approval_history, format_daemon_status, format_file_references,
-        format_models_status, format_pending_approvals, format_tool_execution_response,
-        format_trace_response, format_trace_timeline, format_transcript_response,
-        format_update_status, latest_approval_id, parse_approval_slash, parse_file_references,
+        active_file_reference_query, apply_model_switch_to_config, complete_file_reference,
+        configured_latest_version, format_approval_history, format_daemon_status,
+        format_exec_summary, format_file_references, format_models_status,
+        format_pending_approvals, format_tool_execution_response, format_trace_response,
+        format_trace_timeline, format_transcript_response, format_update_status,
+        latest_approval_id, parse_approval_slash, parse_file_references, parse_model_slash,
         parse_resume_slash, parse_trace_slash, print_exec_response, scan_file_reference_paths,
         shorten_middle, skill_source_label, slash_command_suggestions, tui_bottom_hints,
         tui_help_text, tui_input_line, tui_message_lines, tui_welcome_right, Cli, CommandSpec,
-        ExecOutputMode, FileReferenceIndex, InputBuffer,
+        ExecOutputMode, FileReferenceIndex, InputBuffer, ModelConfigWizard, ModelSwitch,
     };
     use chrono::Utc;
     use clap::Parser;
@@ -2397,6 +2883,78 @@ mod tests {
         assert_eq!(parse_resume_slash("/resume"), Some(None));
         assert_eq!(parse_resume_slash("/resume 12"), Some(Some(12)));
         assert_eq!(parse_resume_slash("/resume nope"), None);
+    }
+
+    #[test]
+    fn parses_only_model_slash_command() {
+        assert_eq!(parse_model_slash("/model"), Some(()));
+        assert_eq!(parse_model_slash("/models"), None);
+        assert_eq!(parse_model_slash("/model config"), None);
+        assert_eq!(
+            parse_model_slash("/model use openai-compatible gpt-4o-mini"),
+            None
+        );
+    }
+
+    #[test]
+    fn model_switch_config_preserves_existing_base_url_and_api_key() {
+        let mut config = toml::Value::Table(toml::toml! {
+            [model]
+            provider = "openai-compatible"
+            model = "gpt-4.1"
+            base_url = "https://example.test/v1"
+            api_key = "file-key"
+        });
+
+        apply_model_switch_to_config(
+            &mut config,
+            &ModelSwitch {
+                provider: "anthropic".into(),
+                model: Some("claude-3-5-sonnet-latest".into()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(config["model"]["provider"].as_str(), Some("anthropic"));
+        assert_eq!(
+            config["model"]["model"].as_str(),
+            Some("claude-3-5-sonnet-latest")
+        );
+        assert_eq!(
+            config["model"]["base_url"].as_str(),
+            Some("https://example.test/v1")
+        );
+        assert_eq!(config["model"]["api_key"].as_str(), Some("file-key"));
+    }
+
+    #[test]
+    fn model_config_wizard_collects_values_and_updates_config() {
+        let mut config = toml::Value::Table(toml::toml! {
+            [model]
+            provider = "mock"
+            model = "mock"
+        });
+        let mut wizard = ModelConfigWizard::from_config(&config);
+
+        assert!(wizard.prompt().contains("provider"));
+        assert_eq!(wizard.accept("openai-compatible").unwrap(), None);
+        assert!(wizard.prompt().contains("model"));
+        assert_eq!(wizard.accept("gpt-4o-mini").unwrap(), None);
+        assert!(wizard.prompt().contains("base_url"));
+        assert_eq!(wizard.accept("https://api.openai.com/v1").unwrap(), None);
+        let finished = wizard.accept("sk-test").unwrap().unwrap();
+
+        finished.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config["model"]["provider"].as_str(),
+            Some("openai-compatible")
+        );
+        assert_eq!(config["model"]["model"].as_str(), Some("gpt-4o-mini"));
+        assert_eq!(
+            config["model"]["base_url"].as_str(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(config["model"]["api_key"].as_str(), Some("sk-test"));
     }
 
     #[test]
@@ -2463,7 +3021,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_metadata_includes_trace_and_context() {
+    fn exec_summary_includes_trace_and_context() {
         let response = ExecTurnResponse {
             started: TurnStarted {
                 session_id: SessionId::from_string("session_1"),
@@ -2486,10 +3044,48 @@ mod tests {
             },
         };
 
-        let metadata = exec_metadata(&response);
+        let metadata = format_exec_summary(&response);
 
-        assert!(metadata.contains("trace: trace_1"));
+        assert!(metadata.contains("Trace trace_1"));
         assert!(metadata.contains("context_ratio=0.250"));
+    }
+
+    #[test]
+    fn exec_summary_formats_tool_and_approval_events_friendly() {
+        let response = ExecTurnResponse {
+            started: TurnStarted {
+                session_id: SessionId::from_string("session_1"),
+                conversation_id: unio_protocol::ConversationId::new(),
+                run_id: RunId::from_string("run_1"),
+                stage: RunStage::Streaming,
+            },
+            completed: TurnCompleted {
+                session_id: SessionId::from_string("session_1"),
+                run_id: RunId::from_string("run_1"),
+                trace_id: TraceId::from_string("trace_1"),
+                stage: RunStage::WaitingApproval,
+                final_text: "Tool execution is waiting for approval: approval_1".into(),
+                events: vec![
+                    "root_agent.completed".into(),
+                    "tool.completed".into(),
+                    "tool.approval_required".into(),
+                    "skill.completed".into(),
+                ],
+                provider: "openai-compatible".into(),
+                model: "gpt-4o-mini".into(),
+                input_tokens: 12,
+                output_tokens: 7,
+                context_ratio: 0.42,
+            },
+        };
+
+        let summary = format_exec_summary(&response);
+
+        assert!(summary.contains("Done WaitingApproval"));
+        assert!(summary.contains("Tool completed"));
+        assert!(summary.contains("Approval required"));
+        assert!(summary.contains("Skill completed"));
+        assert!(!summary.contains("events:"));
     }
 
     #[test]
@@ -2680,8 +3276,8 @@ mod tests {
 
         assert!(tip_text.contains("Tips for getting started"));
         assert!(tip_text.contains("No recent activity"));
-        assert!(tui_input_line("", 0).to_string().contains("Try"));
-        assert!(tui_bottom_hints("", false, &[], 0, &[], 0)
+        assert!(tui_input_line("", 0, None).to_string().contains("Try"));
+        assert!(tui_bottom_hints("", false, &[], 0, &[], 0, None)
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -2692,27 +3288,35 @@ mod tests {
     #[test]
     fn hybrid_bottom_hints_follow_input_prefixes() {
         let slash_suggestions = slash_command_suggestions("/");
-        let slash = tui_bottom_hints("/", false, &[], 0, &slash_suggestions, 0)
+        let slash = tui_bottom_hints("/", false, &[], 0, &slash_suggestions, 0, None)
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let question = tui_bottom_hints("?", false, &[], 0, &[], 0)
+        let question = tui_bottom_hints("?", false, &[], 0, &[], 0, None)
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let file = tui_bottom_hints("@", false, &[], 0, &[], 0)
+        let file = tui_bottom_hints("@", false, &[], 0, &[], 0, None)
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let matches = tui_bottom_hints("inspect @ma", false, &["src/main.rs".into()], 0, &[], 0)
-            .iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let exit = tui_bottom_hints("", true, &[], 0, &[], 0)
+        let matches = tui_bottom_hints(
+            "inspect @ma",
+            false,
+            &["src/main.rs".into()],
+            0,
+            &[],
+            0,
+            None,
+        )
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let exit = tui_bottom_hints("", true, &[], 0, &[], 0, None)
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -2726,6 +3330,28 @@ mod tests {
     }
 
     #[test]
+    fn model_config_wizard_owns_input_placeholder_and_hints() {
+        let config = toml::Value::Table(toml::toml! {
+            [model]
+            provider = "mock"
+            model = "mock"
+        });
+        let wizard = ModelConfigWizard::from_config(&config);
+
+        assert!(tui_input_line("", 0, Some(wizard.input_placeholder()))
+            .to_string()
+            .contains("Model setup 1/4"));
+        let hints = tui_bottom_hints("", false, &[], 0, &[], 0, Some(&wizard))
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(hints.contains("choose provider"));
+        assert!(hints.contains("Enter keeps"));
+    }
+
+    #[test]
     fn slash_command_suggestions_filter_by_prefix() {
         let suggestions = slash_command_suggestions("/re")
             .into_iter()
@@ -2734,6 +3360,11 @@ mod tests {
 
         assert_eq!(suggestions, vec!["/resume", "/refresh"]);
         assert!(slash_command_suggestions("/resume 5").is_empty());
+        let model_suggestions = slash_command_suggestions("/mo")
+            .into_iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+        assert_eq!(model_suggestions, vec!["/model"]);
     }
 
     #[test]
@@ -2791,8 +3422,8 @@ mod tests {
 
         let timeline = format_trace_timeline(&response);
 
-        assert!(timeline.contains("[tool] tool.completed"));
-        assert!(timeline.contains("[context] context.budget"));
+        assert!(timeline.contains("Tool completed read"));
+        assert!(timeline.contains("Context budget checkpoint"));
         assert!(timeline.contains("ratio=0.850"));
     }
 
@@ -2914,8 +3545,8 @@ mod tests {
             approval_id: Some(ApprovalId::from_string("approval_1")),
         });
 
-        assert!(output.contains("status: approval_required"));
-        assert!(output.contains("approval_id: approval_1"));
+        assert!(output.contains("Approval required"));
+        assert!(output.contains("approval_1"));
         assert!(output.contains("write requires approval"));
         assert!(output.contains("content"));
     }

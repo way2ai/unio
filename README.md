@@ -15,6 +15,25 @@ cargo run -p unio -- tool read --args path=README.md
 If model credentials are not configured, Unio uses the mock provider for local
 development.
 
+Configure a real provider interactively:
+
+```powershell
+cargo run -p unio -- "/model"
+```
+
+The slash command shows the active provider, then prompts for model settings and
+updates `~/.unio/config.toml`:
+
+```toml
+[model]
+provider = "openai-compatible"
+model = "gpt-4o-mini"
+api_key = "sk-..."
+```
+
+Environment variables such as `UNIO_MODEL_PROVIDER`, `OPENAI_MODEL`, and
+`OPENAI_API_KEY` override the file.
+
 ## Develop
 
 ```powershell

@@ -27,6 +27,34 @@ Useful prompt features:
 - `Shift+Enter` or `Ctrl+J` inserts a newline.
 - `Ctrl+C` twice exits.
 
+## Model Configuration
+
+The `/model` slash command shows and updates the persistent model settings in
+`~/.unio/config.toml`.
+
+```powershell
+cargo run -p unio -- "/model"
+```
+
+`/model` shows the active provider, then prompts for provider, model, base URL,
+and API key in either the terminal surface or a direct slash invocation. The
+flow updates `~/.unio/config.toml`; environment variables still override the
+file.
+
+## Run Rendering
+
+Interactive and direct command output renders model and tool activity as readable
+run summaries. Tool events are grouped by purpose instead of exposing raw event
+names:
+
+- `Running`: model execution and stage changes.
+- `Tool`: completed tool calls with the tool name and concise target.
+- `Approval`: tool calls waiting for approval or approval decisions.
+- `Skill`: skill-tool activity with the skill name when available.
+- `Done`: final stage, model, token usage, and context ratio.
+
+Raw trace event names remain available through `/trace <trace_id>` for debugging.
+
 ## Direct Tool Commands
 
 ```powershell

@@ -26,6 +26,29 @@ cargo run -p unio
 - `Shift+Enter` 或 `Ctrl+J` 插入换行。
 - 连续两次 `Ctrl+C` 退出。
 
+## 模型配置
+
+`/model` slash command 会显示并更新 `~/.unio/config.toml` 中的持久化模型设置。
+
+```powershell
+cargo run -p unio -- "/model"
+```
+
+`/model` 会先显示当前 provider，然后在终端界面或直接 slash 调用中提示输入 provider、model、
+base URL 和 API key。这个流程会更新 `~/.unio/config.toml`；环境变量仍然优先于配置文件。
+
+## 运行渲染
+
+交互界面和直接命令会把模型与工具活动渲染成更易读的运行摘要，而不是直接暴露原始事件名：
+
+- `Running`：模型执行和阶段变化。
+- `Tool`：已完成的工具调用，包含工具名和简短目标。
+- `Approval`：等待审批的工具调用或审批结果。
+- `Skill`：skill-tool 活动，尽量显示技能名。
+- `Done`：最终阶段、模型、token 用量和上下文比例。
+
+调试时仍可通过 `/trace <trace_id>` 查看原始 trace event。
+
 ## 直接工具命令
 
 ```powershell

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use unio_core::UserPaths;
 use unio_tools::{ToolCall, ToolDefinition};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,20 +54,48 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     pub fn from_env() -> Self {
-        let provider = std::env::var("UNIO_MODEL_PROVIDER").unwrap_or_else(|_| "mock".into());
+        let file_config = read_default_config_file().unwrap_or_default();
+        Self::from_file_config_and_env(file_config, |key| std::env::var(key))
+    }
+
+    #[cfg(test)]
+    fn from_config_text_and_env(
+        config_text: &str,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Self> {
+        let file_config = toml::from_str(config_text)?;
+        Ok(Self::from_file_config_and_env(file_config, |key| {
+            env(key).ok_or(std::env::VarError::NotPresent)
+        }))
+    }
+
+    fn from_file_config_and_env(
+        file_config: UnioConfigFile,
+        env: impl Fn(&str) -> Result<String, std::env::VarError>,
+    ) -> Self {
+        let model_config = file_config.model.unwrap_or_default();
+        let provider = env("UNIO_MODEL_PROVIDER")
+            .ok()
+            .or(model_config.provider)
+            .unwrap_or_else(|| "mock".into());
         match provider.as_str() {
             "openai" | "openai-compatible" => Self {
                 kind: ProviderKind::OpenAi,
-                base_url: std::env::var("OPENAI_BASE_URL").ok(),
-                api_key: std::env::var("OPENAI_API_KEY").ok(),
-                model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
+                base_url: env("OPENAI_BASE_URL").ok().or(model_config.base_url),
+                api_key: env("OPENAI_API_KEY").ok().or(model_config.api_key),
+                model: env("OPENAI_MODEL")
+                    .ok()
+                    .or(model_config.model)
+                    .unwrap_or_else(|| "gpt-4o-mini".into()),
             },
             "anthropic" => Self {
                 kind: ProviderKind::Anthropic,
-                base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
-                api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-                model: std::env::var("ANTHROPIC_MODEL")
-                    .unwrap_or_else(|_| "claude-3-5-sonnet-latest".into()),
+                base_url: env("ANTHROPIC_BASE_URL").ok().or(model_config.base_url),
+                api_key: env("ANTHROPIC_API_KEY").ok().or(model_config.api_key),
+                model: env("ANTHROPIC_MODEL")
+                    .ok()
+                    .or(model_config.model)
+                    .unwrap_or_else(|| "claude-3-5-sonnet-latest".into()),
             },
             _ => Self {
                 kind: ProviderKind::Mock,
@@ -504,7 +533,7 @@ fn parse_key_value_args(value: &str) -> anyhow::Result<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_mock_tool_request, parse_mock_usage_request};
+    use super::{parse_mock_tool_request, parse_mock_usage_request, ProviderConfig, ProviderKind};
 
     #[test]
     fn parses_mock_skill_tool_request() {
@@ -525,4 +554,75 @@ mod tests {
 
         assert_eq!(usage, (90000, 1000));
     }
+
+    #[test]
+    fn loads_openai_compatible_provider_from_config_toml() {
+        let config = ProviderConfig::from_config_text_and_env(
+            r#"
+            [model]
+            provider = "openai-compatible"
+            model = "gpt-4.1"
+            base_url = "https://example.test/v1"
+            api_key = "file-key"
+            "#,
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(config.kind, ProviderKind::OpenAi);
+        assert_eq!(config.model, "gpt-4.1");
+        assert_eq!(config.base_url.as_deref(), Some("https://example.test/v1"));
+        assert_eq!(config.api_key.as_deref(), Some("file-key"));
+    }
+
+    #[test]
+    fn environment_variables_override_config_toml() {
+        let config = ProviderConfig::from_config_text_and_env(
+            r#"
+            [model]
+            provider = "openai-compatible"
+            model = "gpt-4.1"
+            base_url = "https://example.test/v1"
+            api_key = "file-key"
+            "#,
+            |key| match key {
+                "UNIO_MODEL_PROVIDER" => Some("anthropic".into()),
+                "ANTHROPIC_MODEL" => Some("claude-3-5-haiku-latest".into()),
+                "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.test/v1".into()),
+                "ANTHROPIC_API_KEY" => Some("env-key".into()),
+                _ => None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(config.kind, ProviderKind::Anthropic);
+        assert_eq!(config.model, "claude-3-5-haiku-latest");
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://anthropic.example.test/v1")
+        );
+        assert_eq!(config.api_key.as_deref(), Some("env-key"));
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct UnioConfigFile {
+    model: Option<ModelConfigFile>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ModelConfigFile {
+    provider: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+}
+
+fn read_default_config_file() -> anyhow::Result<UnioConfigFile> {
+    let path = UserPaths::current()?.root.join("config.toml");
+    if !path.exists() {
+        return Ok(UnioConfigFile::default());
+    }
+    let config_text = std::fs::read_to_string(path)?;
+    Ok(toml::from_str(&config_text)?)
 }

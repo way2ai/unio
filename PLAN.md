@@ -9,7 +9,9 @@ observability.
 Implemented capabilities:
 
 - `unio exec` creates or resumes a workspace session through the daemon.
-- The root agent can call a model provider and receive model tool calls.
+- The root agent can call a model provider configured from environment
+  variables or `~/.unio/config.toml` and receive model tool calls.
+- `/model` configures or switches the persistent model settings from the CLI.
 - The mock provider supports deterministic local development.
 - Built-in tools include file, process, planning, and skill execution paths.
 - Tool execution goes through `crates/security` before running.
@@ -69,7 +71,7 @@ artifacts, and publishes a GitHub Release.
 3. Keep documentation synchronized with command behavior and release targets.
 4. Add installation details when the first public release artifact is
    available.
-5. Continue improving model provider configuration and error reporting.
+5. Continue improving model provider error reporting and secret handling.
 
 ## Verification Checklist
 

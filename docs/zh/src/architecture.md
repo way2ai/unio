@@ -48,5 +48,6 @@ user
 
 - 不把模型调用、工具执行和持久化放进 CLI。
 - 所有有风险的操作都经过安全策略。
+- 在 model crate 中从 `~/.unio/config.toml` 解析模型配置，并让环境变量作为更高优先级覆盖。
 - 使用 mock provider 保证本地开发可运行。
 - 为 session、run、agent 和 trace 使用显式 ID。

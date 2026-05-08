@@ -1,5 +1,13 @@
 ## Unreleased
 
+- Added persistent real-model configuration through `~/.unio/config.toml`,
+  with environment variables still taking precedence and mock fallback
+  preserved when real provider credentials are missing.
+- Collapsed model configuration to a single `/model` slash command that opens
+  provider and model selection while removing `/models`, `/model config`, and
+  `/model use`.
+- Added friendlier CLI and TUI run rendering for model, tool, skill, approval,
+  and completion events.
 - Rewrote the documentation set around product and developer workflows instead
   of historical implementation notes. The mdBook now contains Overview,
   Install, Quickstart, CLI, Tools And Approvals, Skills, Architecture,
