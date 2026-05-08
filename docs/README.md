@@ -1,26 +1,34 @@
 # Unio Documentation
 
-These documents describe the new Unio system after the from-zero refactor. Old
-`engine/*` code, old sessions, old traces, and old `.skills` layouts are not
-compatibility constraints.
+This directory contains the mdBook source for the Unio project site.
 
-Recommended reading order:
+## Books
 
-- [Get Started](./get-started.md): build, run, use the hybrid CLI, tools,
-  approvals, skills, resume, trace, and tests.
-- [Architecture](./architecture/README.md): runtime layers, main execution
-  flow, crate boundaries, and current architecture contracts.
-- [Hybrid File References](./architecture/hybrid-file-references.md):
-  interactive `@path` suggestions and workspace indexing.
-- [Hybrid Slash Commands](./architecture/hybrid-slash-commands.md):
-  interactive `/` command suggestions and completion behavior.
-- [Hybrid Input Editing](./architecture/hybrid-input-editing.md): cursor
-  movement, delete shortcuts, and multiline prompt behavior.
-- [Target Architecture](./target-architecture/README.md): long-term agent,
-  model, tools, security, storage, observability, and UX goals.
-- [Decisions](./decisions/): architecture decision records.
-- [Current State](./current-state/README.md): how the old system is treated as
-  reference only.
+- English: `docs/src/`
+- Simplified Chinese: `docs/zh/src/`
+- Shared theme customizations: `docs/theme/`
 
-Keep docs and implementation synchronized. Update `PLAN.md`, `README.md`,
-`CHANGE.md`, and the relevant `docs/` file when behavior changes.
+## Local Preview
+
+```powershell
+cargo install mdbook
+mdbook serve docs
+mdbook serve docs/zh
+```
+
+## Local Build
+
+```powershell
+mdbook build docs
+mdbook build docs/zh
+```
+
+English output is written to `docs/book/`. The Chinese build writes to
+`docs/book/zh-CN/` so both languages can be published as one GitHub Pages
+artifact.
+
+## Documentation Policy
+
+Docs are the product and contributor reference for Unio. Keep them synchronized
+with behavior, commands, release targets, security policy, storage contracts,
+and agent workflows.

@@ -5,3 +5,6 @@ src = "src"
 
 [build]
 build-dir = "book"
+
+[output.html]
+theme = "theme"

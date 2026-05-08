@@ -1,67 +1,49 @@
 # Site Operations
 
-This page describes how to build, preview, and deploy the Unio documentation
-site locally and through GitHub Actions.
+The project site is an mdBook published to GitHub Pages. English content lives
+under `docs/src/`; Simplified Chinese content lives under `docs/zh/src/`.
 
 ## Local Preview
 
 Install mdBook:
 
-```sh
+```powershell
 cargo install mdbook
 ```
 
-Build and serve the site locally:
+Serve the English site:
 
-```sh
+```powershell
 mdbook serve docs
 ```
 
-Open `http://localhost:3000` in a browser. The server reloads on file changes.
+Serve the Chinese site:
 
-To only build without serving:
-
-```sh
-mdbook build docs
+```powershell
+mdbook serve docs/zh
 ```
 
-Output is placed in `docs/book/`. This directory is excluded from version
-control via `.gitignore`.
+## Local Build
 
-## CI Workflow
+```powershell
+mdbook build docs
+mdbook build docs/zh
+```
 
-The `.github/workflows/deploy-site.yml` workflow runs on every push to the
-default branch and on `workflow_dispatch`.
+English output is written to `docs/book/`. Chinese output is written to
+`docs/book/zh-CN/`.
 
-Steps performed by the workflow:
+## GitHub Pages
 
-1. Check out the repository.
-2. Set up Rust stable.
-3. Cache Cargo registry and build artifacts.
-4. Run `cargo test --workspace` to verify the codebase before publishing.
-5. Install `mdbook` via `cargo install`.
-6. Run `mdbook build docs` to produce `docs/book/`.
-7. Upload `docs/book/` as a GitHub Pages artifact.
-8. Deploy to GitHub Pages using the official `deploy-pages` action.
+The `.github/workflows/deploy-site.yml` workflow runs on pushes to `main` and
+on manual dispatch. It:
 
-## GitHub Pages Setup
+1. Checks out the repository.
+2. Sets up Rust stable.
+3. Runs `cargo test --workspace`.
+4. Installs mdBook.
+5. Builds English and Chinese mdBooks.
+6. Uploads `docs/book/` as the Pages artifact.
+7. Deploys the artifact through GitHub Pages.
 
-Enable Pages for the repository:
-
-1. Go to **Settings → Pages**.
-2. Set **Source** to **GitHub Actions**.
-3. Push to the default branch or trigger `workflow_dispatch` to publish.
-
-## Build Artifacts
-
-The workflow artifact is `github-pages` uploaded from `docs/book/`. The
-`deploy-pages` action publishes it under the repository Pages URL.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| Workflow fails on `cargo test` | Review test output in the Actions run log. |
-| `mdbook build` fails | Check `docs/src/SUMMARY.md` for missing linked files. |
-| Pages not updated after push | Confirm Pages source is set to GitHub Actions. |
-| Local `mdbook serve` not found | Run `cargo install mdbook` again. |
+Repository Pages should use **GitHub Actions** as the source.

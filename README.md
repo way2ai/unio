@@ -1,40 +1,43 @@
 # Unio
 
-Unio is a Rust-based agent project being rebuilt around a clean daemon, agent,
-tooling, security, skills, storage, and observability architecture.
+Unio is a Rust-based intelligent agent runtime for local developer workflows.
+It combines a CLI, daemon, model abstraction, tools, approvals, skills, storage,
+and observability into one workspace.
 
-Current status: this repository contains the daemon-backed hybrid CLI, session
-runtime, mock/provider model path, tools/security flow, storage/trace support,
-skills, approvals, resume/trace commands, and interactive `@`/`/` completions.
-It is an active first usable refactor target, not a finished Codex/Claude Code
-replacement.
+## Start
 
-Start here:
+```powershell
+cargo run -p unio -- status
+cargo run -p unio -- exec "hello unio"
+cargo run -p unio -- tool read --args path=README.md
+```
 
-- [Get Started](./docs/get-started.md)
-- [Architecture](./docs/architecture/README.md)
-- [Hybrid Input Editing](./docs/architecture/hybrid-input-editing.md)
-- [Hybrid Slash Commands](./docs/architecture/hybrid-slash-commands.md)
-- [Target Architecture](./docs/target-architecture/README.md)
+If model credentials are not configured, Unio uses the mock provider for local
+development.
 
-## Documentation Site
+## Develop
 
-The `docs/` directory is the mdBook source for the project site, published to
-GitHub Pages automatically on every push to the default branch.
+```powershell
+cargo fmt --all
+cargo test --workspace
+cargo build --workspace
+```
 
-Preview locally:
+## Documentation
 
-```sh
+The project site is an mdBook published to GitHub Pages.
+
+```powershell
 cargo install mdbook
 mdbook serve docs
+mdbook serve docs/zh
 ```
 
-Build without serving:
+Read the docs:
 
-```sh
-mdbook build docs
-```
-
-Output is placed in `docs/book/` (excluded from version control). See
-[docs/src/site-operations.md](./docs/src/site-operations.md) for CI and
-deployment details.
+- [Overview](./docs/src/overview.md)
+- [Install](./docs/src/install.md)
+- [Quickstart](./docs/src/quickstart.md)
+- [CLI](./docs/src/cli.md)
+- [Architecture](./docs/src/architecture.md)
+- [Release](./docs/src/release.md)

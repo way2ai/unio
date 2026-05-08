@@ -7,49 +7,141 @@
     display: flex;
     gap: 4px;
   }
+
   .lang-switcher a {
     padding: 3px 8px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-weight: 500;
-    text-decoration: none;
-    color: var(--icons);
     border: 1px solid var(--icons);
-    transition: background 0.15s, color 0.15s;
+    border-radius: 4px;
+    color: var(--icons);
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
   }
-  .lang-switcher a:hover {
-    background: var(--icons);
-    color: var(--bg);
-  }
+
+  .lang-switcher a:hover,
   .lang-switcher a.active {
     background: var(--icons);
     color: var(--bg);
+  }
+
+  .unio-hero {
+    margin: 0 0 2.5rem;
+    padding: clamp(2rem, 6vw, 5rem);
+    border: 1px solid var(--table-border-color);
+    border-radius: 8px;
+    background:
+      linear-gradient(135deg, rgba(30, 64, 175, 0.14), rgba(20, 184, 166, 0.10)),
+      var(--bg);
+  }
+
+  .unio-kicker {
+    margin-bottom: 1rem;
+    color: var(--icons);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .unio-hero h1 {
+    max-width: 850px;
+    margin: 0 0 1rem;
+    font-size: clamp(2.4rem, 8vw, 5.2rem);
+    line-height: 0.95;
+    letter-spacing: 0;
+  }
+
+  .unio-hero p {
+    max-width: 760px;
+    font-size: 1.08rem;
+    line-height: 1.7;
+  }
+
+  .unio-hero pre {
+    max-width: 760px;
+    margin-top: 1.5rem;
+  }
+
+  .unio-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 1.5rem 0;
+  }
+
+  .unio-actions a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.5rem;
+    padding: 0 1rem;
+    border: 1px solid var(--icons);
+    border-radius: 6px;
+    color: var(--fg);
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .unio-actions a:first-child {
+    background: var(--fg);
+    color: var(--bg);
+  }
+
+  .unio-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    margin: 2rem 0;
+  }
+
+  .unio-grid article {
+    padding: 1.25rem;
+    border: 1px solid var(--table-border-color);
+    border-radius: 8px;
+    background: var(--quote-bg);
+  }
+
+  .unio-grid h2 {
+    margin-top: 0;
+    font-size: 1.15rem;
+  }
+
+  .unio-flow {
+    margin: 2rem 0;
+    padding: 1.5rem;
+    border-left: 4px solid var(--icons);
+    background: var(--quote-bg);
+  }
+
+  @media (max-width: 760px) {
+    .lang-switcher {
+      right: 48px;
+    }
+
+    .unio-grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   var path = window.location.pathname;
   var isChinese = path.indexOf('/zh-CN/') !== -1;
-  var enBase = '/unio/';
-  var zhBase = '/unio/zh-CN/';
-
-  var rel = isChinese
-    ? path.replace(/^\/unio\/zh-CN\//, '')
-    : path.replace(/^\/unio\//, '');
-
-  var enHref = enBase + rel;
-  var zhHref = zhBase + rel;
+  var baseMatch = path.match(/^(.*?\/unio\/)/);
+  var root = baseMatch ? baseMatch[1] : '/unio/';
+  var enBase = root;
+  var zhBase = root + 'zh-CN/';
+  var rel = isChinese ? path.replace(zhBase, '') : path.replace(enBase, '');
 
   var switcher = document.createElement('div');
   switcher.className = 'lang-switcher';
 
   var enLink = document.createElement('a');
-  enLink.href = enHref;
+  enLink.href = enBase + rel;
   enLink.textContent = 'EN';
   if (!isChinese) enLink.className = 'active';
 
   var zhLink = document.createElement('a');
-  zhLink.href = zhHref;
+  zhLink.href = zhBase + rel;
   zhLink.textContent = '中文';
   if (isChinese) zhLink.className = 'active';
 
