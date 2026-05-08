@@ -49,10 +49,7 @@ jobs:
 
       - name: Build site (Chinese)
         continue-on-error: true
-        run: |
-          MDBOOK_BOOK__LANGUAGE=zh-CN \
-          MDBOOK_OUTPUT__HTML__SITE_URL=/unio/zh-CN/ \
-          mdbook build docs -d book/zh-CN
+        run: MDBOOK_BOOK__LANGUAGE=zh-CN mdbook build docs -d book/zh-CN
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
