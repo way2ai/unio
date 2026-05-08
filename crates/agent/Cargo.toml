@@ -1,0 +1,16 @@
+[package]
+name = "unio-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+unio-core = { path = "../core" }
+unio-model = { path = "../model" }
+unio-protocol = { path = "../protocol" }
+unio-tools = { path = "../tools" }
+
+[dev-dependencies]
+tokio = { workspace = true }

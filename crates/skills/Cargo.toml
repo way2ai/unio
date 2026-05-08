@@ -1,0 +1,12 @@
+[package]
+name = "unio-skills"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+unio-core = { path = "../core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "unio-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unio-core = { path = "../core" }
+unio-observability = { path = "../observability" }
+unio-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

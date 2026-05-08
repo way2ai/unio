@@ -1,0 +1,9 @@
+[package]
+name = "unio-security"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+unio-core = { path = "../core" }
+unio-protocol = { path = "../protocol" }

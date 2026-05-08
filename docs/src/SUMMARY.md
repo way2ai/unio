@@ -1,0 +1,15 @@
+# Summary
+
+- [Overview](overview.md)
+- [Get Started](get-started.md)
+- [Architecture](architecture.md)
+  - [Hybrid File References](hybrid-file-references.md)
+  - [Hybrid Slash Commands](hybrid-slash-commands.md)
+  - [Hybrid Input Editing](hybrid-input-editing.md)
+- [Target Architecture](target-architecture.md)
+- [Download](download.md)
+- [Site Operations](site-operations.md)
+- [Decisions](decisions/0001-start-from-zero.md)
+  - [ADR 0001: Start From Zero](decisions/0001-start-from-zero.md)
+  - [ADR 0002: Domain Crate Boundaries](decisions/0002-domain-crate-boundaries.md)
+  - [ADR 0003: Storage Contract](decisions/0003-storage-contract.md)

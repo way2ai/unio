@@ -1,0 +1,36 @@
+# Rust 编译输出目录
+**/target/
+
+# Cargo 依赖锁（可选：库项目建议提交，二进制项目可忽略）
+# Cargo.lock
+
+# 环境变量/密钥文件
+.env
+.env.*
+!.env.example
+
+# IDE 配置文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 编辑器临时文件
+*.rs.bk
+
+# 系统垃圾文件
+.DS_Store
+Thumbs.db
+
+# 覆盖率/文档构建临时文件
+**/xcov
+**/cover
+cov.json
+
+# mdBook 构建输出
+docs/book/
+
+# 编译缓存
+.cargo/registry/
+.cargo/git/

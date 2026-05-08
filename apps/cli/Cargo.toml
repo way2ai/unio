@@ -1,0 +1,29 @@
+[package]
+name = "unio"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "unio"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+unio-core = { path = "../../crates/core" }
+unio-daemon = { path = "../daemon" }
+unio-protocol = { path = "../../crates/protocol" }
+unio-skills = { path = "../../crates/skills" }
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
