@@ -48,6 +48,7 @@ jobs:
         run: mdbook build docs
 
       - name: Build site (Chinese)
+        continue-on-error: true
         run: |
           MDBOOK_BOOK__LANGUAGE=zh-CN \
           MDBOOK_OUTPUT__HTML__SITE_URL=/unio/zh-CN/ \

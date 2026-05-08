@@ -1,17 +1,19 @@
 # Chinese (Simplified) translations for Unio documentation
 # Copyright (C) 2026 Unio Contributors
-# MIME-Version: 1.0
-# Content-Type: text/plain; charset=UTF-8
-# Content-Transfer-Encoding: 8bit
-# Language: zh-CN
 
 msgid ""
 msgstr ""
 "Project-Id-Version: Unio\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-08 00:00+0000\n"
+"PO-Revision-Date: 2026-05-08 00:00+0000\n"
+"Last-Translator: Unio Contributors\n"
+"Language-Team: Chinese Simplified\n"
+"Language: zh-CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Language: zh-CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 
 # SUMMARY.md
 msgid "Overview"
