@@ -1,0 +1,10 @@
+[book]
+title = "Unio"
+language = "zh-CN"
+src = "src"
+
+[build]
+build-dir = "../book/zh-CN"
+
+[output.html]
+theme = "../theme"

@@ -42,14 +42,13 @@ jobs:
         run: cargo test --workspace
 
       - name: Install mdBook
-        run: cargo install mdbook mdbook-i18n-helpers
+        run: cargo install mdbook
 
       - name: Build site (English)
         run: mdbook build docs
 
       - name: Build site (Chinese)
-        continue-on-error: true
-        run: MDBOOK_BOOK__LANGUAGE=zh-CN mdbook build docs -d book/zh-CN
+        run: mdbook build docs/zh
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
