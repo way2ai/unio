@@ -672,7 +672,62 @@ Status: completed.
 - `cargo test --workspace` is a required step before site publication.
 - `docs/book/` is excluded from version control.
 
-## Verification Checklist
+## Phase 7B: Download Page And Release Automation
+
+Status: completed.
+
+### Goals
+
+- Publish pre-built binaries for all major platforms via GitHub Releases.
+- Make the download page useful before binaries exist by providing links and
+  clear source-build fallback instructions.
+
+### Tasks
+
+1. Create `.github/workflows/release.yml` triggered on `v*` tag push. (done)
+   - Matrix: Linux x86_64, Windows x86_64, macOS Intel, macOS Apple Silicon.
+   - Each job builds `unio` and `unio-daemon`, packages into `.tar.gz` / `.zip`.
+   - Final `release` job attaches all archives to a GitHub Release.
+2. Update `docs/src/download.md` with a per-platform binary download table. (done)
+   - Links point to `https://github.com/way2ai/unio/releases/latest/download/`.
+   - Source build section retained as fallback.
+
+### Acceptance
+
+- Pushing `git tag v0.1.0 && git push origin v0.1.0` triggers the workflow.
+- GitHub Release is created with 4 platform archives attached.
+- Download page table links resolve to the correct archive names.
+
+## Phase 7C: Chinese/English Multilingual Site
+
+Status: completed.
+
+### Goals
+
+- Support Chinese (Simplified) as a second language on the documentation site.
+- Default language remains English; Chinese is accessible via a language switcher.
+- Keep a single source-of-truth `docs/src/` rather than duplicating pages.
+
+### Tasks
+
+1. Add `[preprocessor.gettext]` to `docs/book.toml`. (done)
+2. Create `docs/po/zh-CN.po` with full Chinese translations for all pages. (done)
+3. Create `docs/theme/head.hbs` with EN / 中文 language switcher. (done)
+   - Active language highlighted; switcher is position-fixed in the top-right.
+4. Update `.github/workflows/deploy-site.yml`: (done)
+   - Install `mdbook-i18n-helpers` alongside `mdbook`.
+   - Add Chinese build step: output to `docs/book/zh-CN/`.
+   - Chinese subdirectory is included in the same Pages artifact.
+
+### Acceptance
+
+- `mdbook build docs` produces English site at `docs/book/`.
+- `MDBOOK_BOOK__LANGUAGE=zh-CN mdbook build docs -d book/zh-CN` produces Chinese
+  site at `docs/book/zh-CN/`.
+- Language switcher appears on every page and navigates between EN and 中文.
+- CI publishes both language builds to GitHub Pages.
+
+
 
 Run these after each meaningful slice:
 

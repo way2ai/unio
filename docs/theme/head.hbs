@@ -1,0 +1,59 @@
+<style>
+  .lang-switcher {
+    position: fixed;
+    top: 8px;
+    right: 56px;
+    z-index: 101;
+    display: flex;
+    gap: 4px;
+  }
+  .lang-switcher a {
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    color: var(--icons);
+    border: 1px solid var(--icons);
+    transition: background 0.15s, color 0.15s;
+  }
+  .lang-switcher a:hover {
+    background: var(--icons);
+    color: var(--bg);
+  }
+  .lang-switcher a.active {
+    background: var(--icons);
+    color: var(--bg);
+  }
+</style>
+<div class="lang-switcher" id="lang-switcher"></div>
+<script>
+(function () {
+  var path = window.location.pathname;
+  var isChinese = path.indexOf('/zh-CN/') !== -1;
+  var enBase = '/unio/';
+  var zhBase = '/unio/zh-CN/';
+
+  // Derive the page-relative path
+  var rel = isChinese
+    ? path.replace(/^\/unio\/zh-CN\//, '')
+    : path.replace(/^\/unio\//, '');
+
+  var enHref = enBase + rel;
+  var zhHref = zhBase + rel;
+
+  var switcher = document.getElementById('lang-switcher');
+  var enLink = document.createElement('a');
+  enLink.href = enHref;
+  enLink.textContent = 'EN';
+  if (!isChinese) enLink.className = 'active';
+
+  var zhLink = document.createElement('a');
+  zhLink.href = zhHref;
+  zhLink.textContent = '中文';
+  if (isChinese) zhLink.className = 'active';
+
+  switcher.appendChild(enLink);
+  switcher.appendChild(zhLink);
+})();
+</script>

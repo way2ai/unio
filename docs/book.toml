@@ -5,3 +5,6 @@ src = "src"
 
 [build]
 build-dir = "book"
+
+[preprocessor.gettext]
+after = ["links"]

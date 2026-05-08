@@ -42,10 +42,16 @@ jobs:
         run: cargo test --workspace
 
       - name: Install mdBook
-        run: cargo install mdbook
+        run: cargo install mdbook mdbook-i18n-helpers
 
-      - name: Build site
+      - name: Build site (English)
         run: mdbook build docs
+
+      - name: Build site (Chinese)
+        run: |
+          MDBOOK_BOOK__LANGUAGE=zh-CN \
+          MDBOOK_OUTPUT__HTML__SITE_URL=/unio/zh-CN/ \
+          mdbook build docs -d book/zh-CN
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

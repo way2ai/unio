@@ -1,5 +1,19 @@
 ## Unreleased
 
+- Added `.github/workflows/release.yml` to build and publish pre-built
+  binaries on git tag pushes (`v*`). Builds `unio` and `unio-daemon` for
+  Linux x86_64, Windows x86_64, macOS Intel, and macOS Apple Silicon. Each
+  platform produces a `.tar.gz` or `.zip` archive attached to a GitHub Release.
+- Updated `docs/src/download.md` with a pre-built binary download table and
+  per-platform archive links pointing to the latest GitHub Release.
+- Added Chinese (Simplified) translation support via `mdbook-i18n-helpers`.
+  Added `[preprocessor.gettext]` to `docs/book.toml`, created
+  `docs/po/zh-CN.po` with full Chinese translations, and added
+  `docs/theme/head.hbs` with a language switcher button (EN / 中文).
+- Updated `.github/workflows/deploy-site.yml` to install `mdbook-i18n-helpers`
+  and build both the English and Chinese site. The Chinese build is output to
+  `docs/book/zh-CN/` and published as a subdirectory of the same GitHub Pages
+  artifact.
 - Added mdBook site source under `docs/src/` with `docs/book.toml` and
   `docs/src/SUMMARY.md`. Existing `docs/` content is migrated into
   `docs/src/` pages for Overview, Get Started, Architecture, hybrid surface

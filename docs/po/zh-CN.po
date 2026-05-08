@@ -1,0 +1,329 @@
+# Chinese (Simplified) translations for Unio documentation
+# Copyright (C) 2026 Unio Contributors
+# MIME-Version: 1.0
+# Content-Type: text/plain; charset=UTF-8
+# Content-Transfer-Encoding: 8bit
+# Language: zh-CN
+
+msgid ""
+msgstr ""
+"Project-Id-Version: Unio\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh-CN\n"
+
+# SUMMARY.md
+msgid "Overview"
+msgstr "概览"
+
+msgid "Get Started"
+msgstr "快速开始"
+
+msgid "Architecture"
+msgstr "架构"
+
+msgid "Hybrid File References"
+msgstr "混合文件引用"
+
+msgid "Hybrid Slash Commands"
+msgstr "混合斜杠命令"
+
+msgid "Hybrid Input Editing"
+msgstr "混合输入编辑"
+
+msgid "Target Architecture"
+msgstr "目标架构"
+
+msgid "Download"
+msgstr "下载"
+
+msgid "Site Operations"
+msgstr "站点运维"
+
+msgid "ADR 0001: Start From Zero"
+msgstr "ADR 0001：从零开始"
+
+msgid "ADR 0002: Domain Crate Boundaries"
+msgstr "ADR 0002：领域 Crate 边界"
+
+msgid "ADR 0003: Storage Contract"
+msgstr "ADR 0003：存储合同"
+
+# overview.md
+msgid "Unio Documentation"
+msgstr "Unio 文档"
+
+msgid ""
+"These documents describe the Unio system after the from-zero refactor."
+msgstr "本文档描述从零重构后的 Unio 系统。"
+
+msgid "Recommended reading order:"
+msgstr "推荐阅读顺序："
+
+msgid ""
+"[Get Started](get-started.md): build, run, use the hybrid CLI, tools,\n"
+"approvals, skills, resume, trace, and tests."
+msgstr ""
+"[快速开始](get-started.md)：构建、运行、使用混合 CLI、工具、审批、技能、恢复、"
+"追踪和测试。"
+
+msgid ""
+"[Architecture](architecture.md): runtime layers, main execution flow, crate\n"
+"boundaries, and current architecture contracts."
+msgstr ""
+"[架构](architecture.md)：运行时层次、主执行流、crate 边界和当前架构契约。"
+
+msgid ""
+"[Hybrid File References](hybrid-file-references.md): interactive `@path`\n"
+"suggestions and workspace indexing."
+msgstr ""
+"[混合文件引用](hybrid-file-references.md)：交互式 `@path` 建议与工作区索引。"
+
+msgid ""
+"[Hybrid Slash Commands](hybrid-slash-commands.md): interactive `/` command\n"
+"suggestions and completion behavior."
+msgstr ""
+"[混合斜杠命令](hybrid-slash-commands.md)：交互式 `/` 命令建议与补全行为。"
+
+msgid ""
+"[Hybrid Input Editing](hybrid-input-editing.md): cursor movement, delete\n"
+"shortcuts, and multiline prompt behavior."
+msgstr ""
+"[混合输入编辑](hybrid-input-editing.md)：光标移动、删除快捷键和多行提示行为。"
+
+msgid ""
+"[Target Architecture](target-architecture.md): long-term agent, model, tools,\n"
+"security, storage, observability, and UX goals."
+msgstr ""
+"[目标架构](target-architecture.md)：长期的 agent、模型、工具、安全、存储、可观测性"
+"和 UX 目标。"
+
+msgid "[Download](download.md): how to obtain and build Unio."
+msgstr "[下载](download.md)：如何获取和构建 Unio。"
+
+msgid "[Site Operations](site-operations.md): local preview, CI, and GitHub Pages."
+msgstr "[站点运维](site-operations.md)：本地预览、CI 和 GitHub Pages。"
+
+msgid ""
+"[Decisions](decisions/0001-start-from-zero.md): architecture decision records."
+msgstr "[决策记录](decisions/0001-start-from-zero.md)：架构决策记录。"
+
+msgid ""
+"Keep docs and implementation synchronized. Update `PLAN.md`, `README.md`,\n"
+"`CHANGE.md`, and the relevant `docs/` file when behavior changes."
+msgstr ""
+"保持文档与实现同步。行为变更时更新 `PLAN.md`、`README.md`、`CHANGE.md` 以及相关的 "
+"`docs/` 文件。"
+
+# get-started.md
+msgid "Requirements"
+msgstr "环境要求"
+
+msgid "Build And Test"
+msgstr "构建与测试"
+
+msgid "Start Unio"
+msgstr "启动 Unio"
+
+msgid ""
+"Launch the hybrid CLI/TUI:"
+msgstr "启动混合 CLI/TUI："
+
+msgid ""
+"The bare `unio` entry opens the interactive surface. Scriptable commands remain\n"
+"available:"
+msgstr "裸 `unio` 命令打开交互界面，脚本化子命令同样可用："
+
+msgid ""
+"If model credentials are not configured, Unio falls back to the mock provider."
+msgstr "若未配置模型凭证，Unio 将回退到 mock provider。"
+
+msgid "Hybrid Input"
+msgstr "混合输入"
+
+msgid "Useful keys in the hybrid surface:"
+msgstr "混合界面常用按键："
+
+msgid "Tools And Approvals"
+msgstr "工具与审批"
+
+msgid "Run tools directly:"
+msgstr "直接运行工具："
+
+msgid ""
+"In `default` mode, writes and process execution require approval:"
+msgstr "在 `default` 模式下，写操作和进程执行需要审批："
+
+msgid ""
+"Use `full-trust` only when intentionally allowing execution:"
+msgstr "仅在明确允许执行时使用 `full-trust`："
+
+msgid "Skills"
+msgstr "技能"
+
+msgid "Unio discovers skills from:"
+msgstr "Unio 从以下路径发现技能："
+
+msgid "Create and list a workspace skill:"
+msgstr "创建并列出工作区技能："
+
+msgid "Invoke a skill through the tool contract:"
+msgstr "通过工具契约调用技能："
+
+msgid "Mock Development Paths"
+msgstr "Mock 开发路径"
+
+msgid ""
+"Use mock directives when developing without model credentials:"
+msgstr "在没有模型凭证的情况下开发时，使用 mock 指令："
+
+# architecture.md
+msgid "Workspace Layout"
+msgstr "工作区结构"
+
+msgid "Main Flow"
+msgstr "主执行流"
+
+msgid "ID Model"
+msgstr "ID 模型"
+
+msgid "Current Contracts"
+msgstr "当前契约"
+
+# download.md
+msgid "Pre-built Binaries"
+msgstr "预构建二进制"
+
+msgid "Download the latest release for your platform:"
+msgstr "下载适合您平台的最新版本："
+
+msgid "Platform"
+msgstr "平台"
+
+msgid "Architecture"
+msgstr "架构"
+
+msgid "Archive"
+msgstr "归档包"
+
+msgid "Each archive contains two binaries:"
+msgstr "每个归档包含两个二进制文件："
+
+msgid "For all releases and changelogs visit the"
+msgstr "访问以下链接查看所有版本和更新日志："
+
+msgid ""
+"**Note:** Pre-built binaries are published when a version tag (`v*`) is\n"
+"pushed to the repository. If no release exists yet, build from source using\n"
+"the instructions below."
+msgstr ""
+"**注意：** 当版本标签（`v*`）被推送到仓库时，将发布预构建二进制文件。"
+"若暂无发布版本，请按下方说明从源码构建。"
+
+msgid "Build From Source"
+msgstr "从源码构建"
+
+msgid ""
+"The compiled binaries are placed under `target/release/`:"
+msgstr "编译后的二进制文件位于 `target/release/` 目录下："
+
+msgid "Run Without Installing"
+msgstr "无需安装直接运行"
+
+msgid ""
+"During development, use `cargo run` from the repository root:"
+msgstr "开发期间，在仓库根目录使用 `cargo run`："
+
+msgid "Run Tests"
+msgstr "运行测试"
+
+# site-operations.md
+msgid "Site Operations"
+msgstr "站点运维"
+
+msgid ""
+"This page describes how to build, preview, and deploy the Unio documentation\n"
+"site locally and through GitHub Actions."
+msgstr "本页说明如何在本地及通过 GitHub Actions 构建、预览和部署 Unio 文档站点。"
+
+msgid "Local Preview"
+msgstr "本地预览"
+
+msgid "Install mdBook:"
+msgstr "安装 mdBook："
+
+msgid "Build and serve the site locally:"
+msgstr "在本地构建并提供服务："
+
+msgid ""
+"Open `http://localhost:3000` in a browser. The server reloads on file changes."
+msgstr "在浏览器中打开 `http://localhost:3000`。服务器在文件变更时自动重载。"
+
+msgid "To only build without serving:"
+msgstr "仅构建不启动服务："
+
+msgid ""
+"Output is placed in `docs/book/`. This directory is excluded from version\n"
+"control via `.gitignore`."
+msgstr "输出位于 `docs/book/`，该目录已通过 `.gitignore` 排除在版本控制之外。"
+
+msgid "CI Workflow"
+msgstr "CI 工作流"
+
+msgid ""
+"The `.github/workflows/deploy-site.yml` workflow runs on every push to the\n"
+"default branch and on `workflow_dispatch`."
+msgstr "`.github/workflows/deploy-site.yml` 工作流在每次推送到默认分支或触发 `workflow_dispatch` 时运行。"
+
+msgid "Steps performed by the workflow:"
+msgstr "工作流执行步骤："
+
+msgid "GitHub Pages Setup"
+msgstr "GitHub Pages 配置"
+
+msgid "Enable Pages for the repository:"
+msgstr "为仓库启用 Pages："
+
+msgid "Build Artifacts"
+msgstr "构建产物"
+
+msgid ""
+"The workflow artifact is `github-pages` uploaded from `docs/book/`. The\n"
+"`deploy-pages` action publishes it under the repository Pages URL."
+msgstr ""
+"工作流产物 `github-pages` 从 `docs/book/` 上传，`deploy-pages` action 将其发布到"
+"仓库的 Pages URL 下。"
+
+msgid "Troubleshooting"
+msgstr "故障排查"
+
+msgid "Symptom"
+msgstr "现象"
+
+msgid "Check"
+msgstr "检查项"
+
+# target-architecture.md
+msgid "Target Architecture"
+msgstr "目标架构"
+
+msgid ""
+"Unio targets a daemon-backed intelligent agent system with one user-facing\n"
+"entrypoint: `unio`."
+msgstr "Unio 的目标是以 daemon 为后端的智能 agent 系统，用户侧只有一个入口：`unio`。"
+
+msgid "Hybrid CLI"
+msgstr "混合 CLI"
+
+msgid "Daemon"
+msgstr "守护进程"
+
+msgid "Agent"
+msgstr "Agent"
+
+msgid "Tools And Security"
+msgstr "工具与安全"
+
+msgid "Storage And Observability"
+msgstr "存储与可观测性"
