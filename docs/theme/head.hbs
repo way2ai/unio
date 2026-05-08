@@ -26,15 +26,13 @@
     color: var(--bg);
   }
 </style>
-<div class="lang-switcher" id="lang-switcher"></div>
 <script>
-(function () {
+document.addEventListener('DOMContentLoaded', function () {
   var path = window.location.pathname;
   var isChinese = path.indexOf('/zh-CN/') !== -1;
   var enBase = '/unio/';
   var zhBase = '/unio/zh-CN/';
 
-  // Derive the page-relative path
   var rel = isChinese
     ? path.replace(/^\/unio\/zh-CN\//, '')
     : path.replace(/^\/unio\//, '');
@@ -42,7 +40,9 @@
   var enHref = enBase + rel;
   var zhHref = zhBase + rel;
 
-  var switcher = document.getElementById('lang-switcher');
+  var switcher = document.createElement('div');
+  switcher.className = 'lang-switcher';
+
   var enLink = document.createElement('a');
   enLink.href = enHref;
   enLink.textContent = 'EN';
@@ -55,5 +55,6 @@
 
   switcher.appendChild(enLink);
   switcher.appendChild(zhLink);
-})();
+  document.body.appendChild(switcher);
+});
 </script>
