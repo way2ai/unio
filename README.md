@@ -21,6 +21,23 @@ Configure a real provider interactively:
 cargo run -p unio -- "/model"
 ```
 
+In the interactive terminal surface, submitted prompts clear from the editing
+area immediately and appear in the message stream while the agent runs.
+Each completed turn is rendered as a friendly block with `> user input`,
+`process`, `result`, and `Worked for` duration lines, and colored status dots
+for process steps.
+Root slash commands such as `/approval`, `/approve`, `/deny`, and `/trace`
+support guided usage without required arguments.
+Session handling now defaults to creating a new session each time you start
+`unio` in a workspace. Use `/resume` in TUI mode to pick and switch to an
+existing workspace session (`Up/Down`, `Enter`, `Esc`), or `/new` to create and
+switch to a fresh one immediately.
+When approvals are required, the TUI shows an inline review card with preview
+and keyboard selection (`Up/Down` select, `Enter` confirm). Numeric actions
+(`1` yes, `2` yes and allow session edits, `3` no) remain available.
+If a model-requested tool call fails, Unio feeds that failure result back to
+the model and allows one automatic retry in the same turn.
+
 The slash command shows the active provider, then prompts for model settings and
 updates `~/.unio/config.toml`:
 

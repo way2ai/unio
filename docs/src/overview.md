@@ -21,7 +21,7 @@ cargo run -p unio -- tool read --args path=README.md</code></pre>
 <section class="unio-grid">
   <article>
     <h2>Agent Workflows</h2>
-    <p>Run prompts, resume sessions, inspect traces, and keep conversation state
+    <p>Run prompts, switch sessions, inspect traces, and keep conversation state
     attached to a workspace.</p>
   </article>
   <article>

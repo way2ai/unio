@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use encoding_rs::GBK;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use unio_core::WorkspacePaths;
@@ -232,7 +233,15 @@ fn run_glob(workspace_root: &Path, args: &Value) -> anyhow::Result<String> {
         .filter(|path| wildcard_match(pattern, &path.to_string_lossy()))
         .map(|path| path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
-    Ok(matched.join("\n"))
+    let mut lines = vec![
+        format!("pattern={pattern}"),
+        format!("count={}", matched.len()),
+    ];
+    if !matched.is_empty() {
+        lines.push("matches:".into());
+        lines.extend(matched.into_iter().take(200));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn run_grep(workspace_root: &Path, args: &Value) -> anyhow::Result<String> {
@@ -285,7 +294,12 @@ fn run_edit(workspace_root: &Path, args: &Value) -> anyhow::Result<String> {
 fn run_bash(workspace_root: &Path, args: &Value) -> anyhow::Result<String> {
     let command = required_str(args, "command")?;
     if has_shell_syntax(command) {
-        anyhow::bail!("shell syntax is not allowed in bash tool");
+        if let Some(result) = run_supported_pipeline(workspace_root, command)? {
+            return Ok(result);
+        }
+        anyhow::bail!(
+            "shell syntax is not allowed in bash tool (supported subset: `<command> | wc -l`)"
+        );
     }
     let mut parts = command.split_whitespace();
     let program = parts
@@ -296,9 +310,68 @@ fn run_bash(workspace_root: &Path, args: &Value) -> anyhow::Result<String> {
         .current_dir(workspace_root)
         .output()?;
     let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text.push_str(&decode_process_output(&output.stdout));
+    text.push_str(&decode_process_output(&output.stderr));
     Ok(text)
+}
+
+fn run_supported_pipeline(workspace_root: &Path, command: &str) -> anyhow::Result<Option<String>> {
+    let segments = command.split('|').map(str::trim).collect::<Vec<_>>();
+    if segments.len() != 2 {
+        return Ok(None);
+    }
+    if segments[0].is_empty() || segments[1].is_empty() {
+        return Ok(None);
+    }
+    if segments[1] != "wc -l" {
+        return Ok(None);
+    }
+    if has_shell_syntax(segments[0]) {
+        return Ok(None);
+    }
+    let output = run_plain_command(workspace_root, segments[0])?;
+    if !output.status.success() {
+        let mut text = String::new();
+        text.push_str(&decode_process_output(&output.stdout));
+        text.push_str(&decode_process_output(&output.stderr));
+        return Ok(Some(text));
+    }
+    let stdout = decode_process_output(&output.stdout);
+    let count = stdout
+        .as_bytes()
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count();
+    Ok(Some(format!("{count}\n")))
+}
+
+fn run_plain_command(workspace_root: &Path, command: &str) -> anyhow::Result<std::process::Output> {
+    let mut parts = command.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty command"))?;
+    Ok(Command::new(program)
+        .args(parts)
+        .current_dir(workspace_root)
+        .output()?)
+}
+
+fn decode_process_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    #[cfg(windows)]
+    {
+        let (text, _, _) = GBK.decode(bytes);
+        return text.into_owned();
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 async fn run_fetch(args: &Value) -> anyhow::Result<String> {
@@ -496,6 +569,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_tool_completes_in_full_trust_mode() {
+        let dir = tempdir().unwrap();
+        let registry = ToolRegistry::with_builtin_tools();
+        let outcome = registry
+            .execute(
+                ToolCall {
+                    call_id: "call_1".into(),
+                    name: "write".into(),
+                    arguments: json!({ "path": "hello.txt", "content": "hello" }),
+                },
+                ToolExecutionContext {
+                    workspace_root: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    permission_mode: PermissionMode::FullTrust,
+                },
+            )
+            .await;
+
+        assert_eq!(outcome.status, ToolExecutionStatus::Completed);
+        assert!(dir.path().join("hello.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn glob_tool_reports_count_even_when_no_match() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        let registry = ToolRegistry::with_builtin_tools();
+        let outcome = registry
+            .execute(
+                ToolCall {
+                    call_id: "call_1".into(),
+                    name: "glob".into(),
+                    arguments: json!({ "pattern": "**/*.md" }),
+                },
+                ToolExecutionContext {
+                    workspace_root: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    permission_mode: PermissionMode::Default,
+                },
+            )
+            .await;
+
+        assert_eq!(outcome.status, ToolExecutionStatus::Completed);
+        let content = outcome.result.unwrap().content;
+        assert!(content.contains("count=0"));
+    }
+
+    #[tokio::test]
     async fn skill_tool_returns_structured_skill_agent_result() {
         let dir = tempdir().unwrap();
         let skill_dir = dir.path().join(".unio").join("skills").join("repo");
@@ -525,5 +646,60 @@ mod tests {
         let content = outcome.result.unwrap().content;
         assert!(content.contains("\"skill_name\":\"repo\""));
         assert!(!content.contains("Private instruction body"));
+    }
+
+    #[tokio::test]
+    async fn bash_tool_supports_pipe_to_wc_l_subset() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+        let registry = ToolRegistry::with_builtin_tools();
+        let outcome = registry
+            .execute(
+                ToolCall {
+                    call_id: "call_1".into(),
+                    name: "bash".into(),
+                    arguments: json!({ "command": "cmd /c dir /b | wc -l" }),
+                },
+                ToolExecutionContext {
+                    workspace_root: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    permission_mode: PermissionMode::FullTrust,
+                },
+            )
+            .await;
+
+        assert_eq!(outcome.status, ToolExecutionStatus::Completed);
+        assert!(outcome
+            .result
+            .unwrap()
+            .content
+            .trim()
+            .parse::<usize>()
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn bash_tool_rejects_unsupported_shell_syntax() {
+        let dir = tempdir().unwrap();
+        let registry = ToolRegistry::with_builtin_tools();
+        let outcome = registry
+            .execute(
+                ToolCall {
+                    call_id: "call_1".into(),
+                    name: "bash".into(),
+                    arguments: json!({ "command": "echo hi | sort" }),
+                },
+                ToolExecutionContext {
+                    workspace_root: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    permission_mode: PermissionMode::FullTrust,
+                },
+            )
+            .await;
+
+        assert_eq!(outcome.status, ToolExecutionStatus::Failed);
+        let reason = outcome.reason.unwrap_or_default();
+        assert!(reason.contains("supported subset"));
     }
 }

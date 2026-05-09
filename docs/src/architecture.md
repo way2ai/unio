@@ -40,6 +40,12 @@ user
 
 - `apps/cli` owns user interaction and command parsing.
 - `apps/daemon` owns runtime orchestration and persistence.
+- `apps/daemon` runs a bounded ReAct continuation after tool execution
+  (including successful tool calls): it feeds structured tool outputs back into
+  model context and continues until final answer or approval wait state. The
+  same continuation also runs after approved tool execution, including failed
+  tool outcomes, so users receive a follow-up answer instead of raw tool status
+  only.
 - `crates/protocol` defines shared request and response types.
 - `crates/security` returns allow, deny, or approval-required decisions.
 - `crates/tools` executes registered tools only after precheck.

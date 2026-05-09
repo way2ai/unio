@@ -19,13 +19,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 use reqwest::Client;
-use unio_core::{read_instance_file, DaemonInstance, UserPaths, WorkspacePaths};
+use unio_core::{read_instance_file, DaemonInstance, RunId, SessionId, UserPaths, WorkspacePaths};
 use unio_protocol::{
     ApprovalHistoryResponse, ApprovalListResponse, ApprovalResolveRequest, ApprovalResolveResponse,
     DaemonStatus, ExecTurnRequest, ExecTurnResponse, LoadTranscriptRequest, LoadTranscriptResponse,
-    ModelsStatus, PermissionMode, ResolveSessionRequest, ResolveSessionResponse, RunStage,
-    SessionSummary, ToolExecuteRequest, ToolExecuteResponse, TraceLookupRequest,
-    TraceLookupResponse, TranscriptMessage,
+    ModelsStatus, PendingApprovalSummary, PermissionMode, ResolveSessionRequest,
+    ResolveSessionResponse, RunStage, SessionResolveStrategy, SessionSummary, ToolExecuteRequest,
+    ToolExecuteResponse, TraceLookupRequest, TraceLookupResponse, TranscriptMessage,
 };
 use unio_skills::{discover_skills, inject_skill_tools, SkillSource};
 
@@ -148,6 +148,15 @@ pub async fn run() -> anyhow::Result<()> {
 
 async fn run_prompt_or_slash(prompt: String) -> anyhow::Result<()> {
     let trimmed = prompt.trim();
+    if trimmed == "/approve" {
+        return run_guided_approval_resolution(true).await;
+    }
+    if trimmed == "/deny" {
+        return run_guided_approval_resolution(false).await;
+    }
+    if trimmed == "/trace" {
+        return run_guided_trace_query().await;
+    }
     if let Some((approved, approval_id)) = parse_approval_slash(trimmed) {
         let client = daemon_client(true).await?;
         return resolve_approval(&client, approval_id, approved).await;
@@ -158,10 +167,19 @@ async fn run_prompt_or_slash(prompt: String) -> anyhow::Result<()> {
     if let Some(limit) = parse_resume_slash(trimmed) {
         return run_resume(None, limit).await;
     }
+    if let Some(mode) = parse_approval_mode_slash(trimmed) {
+        return run_approval_mode_config(mode).await;
+    }
+    if trimmed == "/new" {
+        return run_new_session().await;
+    }
+    if trimmed.starts_with("/approval ") {
+        anyhow::bail!("invalid approval mode; use /approval <default|auto|full-trust>");
+    }
 
     match trimmed {
         "/skills" => run_skills(),
-        "/approval" | "/approvals" => run_approvals(None).await,
+        "/pending" => run_approvals(None).await,
         "/update" => run_update(),
         "?" | "/?" => {
             print_slash_help();
@@ -202,14 +220,27 @@ async fn run_tui() -> anyhow::Result<()> {
 async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
     let client = daemon_client(true).await?;
     let workspace = std::env::current_dir()?;
+    let workspace_text = workspace.to_string_lossy().to_string();
+    let initial_session = resolve_session(
+        &client,
+        &workspace,
+        PermissionMode::Default,
+        SessionResolveStrategy::CreateNew,
+    )
+    .await?;
     let mut status = fetch_status(&client).await?;
     let mut input = InputBuffer::default();
     let mut scroll = 0_u16;
     let mut current_stage = "idle".to_string();
+    let mut current_permission_mode = initial_session.permission_mode;
+    let mut active_session_id = initial_session.session_id.clone();
     let mut latest_pending_approval_id: Option<String> = None;
+    let mut latest_pending_approval: Option<PendingApprovalSummary> = None;
+    let mut resume_picker: Option<ResumePickerState> = None;
     let mut ctrl_c_armed = false;
     let mut selected_file_suggestion = 0_usize;
     let mut selected_slash_suggestion = 0_usize;
+    let mut selected_approval_choice = 0_usize;
     let mut messages = Vec::<String>::new();
     let mut model_config_wizard: Option<ModelConfigWizard> = None;
     let file_index = FileReferenceIndex::start(workspace.clone());
@@ -224,104 +255,24 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
         if selected_slash_suggestion >= slash_suggestions.len() {
             selected_slash_suggestion = 0;
         }
-        let welcome_left = tui_welcome_left(
+        draw_tui(
+            terminal,
             &status,
-            workspace.display().to_string(),
+            &workspace,
             &current_stage,
             latest_pending_approval_id.as_deref(),
-        );
-        let welcome_right = tui_welcome_right(messages.last().map(String::as_str));
-        let message_lines = tui_message_lines(&messages);
-        let input_line = tui_input_line(
-            input.as_str(),
-            input.cursor(),
-            model_config_wizard
-                .as_ref()
-                .map(ModelConfigWizard::input_placeholder),
-        );
-        let help_lines = tui_bottom_hints(
-            input_before_cursor,
+            latest_pending_approval.as_ref(),
+            selected_approval_choice,
+            &messages,
+            &input,
+            scroll,
             ctrl_c_armed,
             &file_suggestions,
             selected_file_suggestion,
             &slash_suggestions,
             selected_slash_suggestion,
             model_config_wizard.as_ref(),
-        );
-
-        terminal.draw(|frame| {
-            let root = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(12),
-                    Constraint::Min(3),
-                    Constraint::Length(3),
-                    Constraint::Length(7),
-                ])
-                .split(frame.area());
-
-            let welcome_block = Block::default()
-                .title(Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("Unio v{}", env!("CARGO_PKG_VERSION")),
-                        Style::default()
-                            .fg(tui_accent())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                ]))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(tui_accent()));
-            let welcome_inner = welcome_block.inner(root[0]);
-            frame.render_widget(welcome_block, root[0]);
-
-            let welcome_columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-                .split(welcome_inner);
-            frame.render_widget(
-                Paragraph::new(welcome_left)
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .wrap(Wrap { trim: false }),
-                welcome_columns[0],
-            );
-            frame.render_widget(
-                Paragraph::new(welcome_right)
-                    .block(
-                        Block::default()
-                            .borders(Borders::LEFT)
-                            .border_style(Style::default().fg(tui_accent())),
-                    )
-                    .wrap(Wrap { trim: false }),
-                welcome_columns[1],
-            );
-            frame.render_widget(
-                Paragraph::new(message_lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::TOP)
-                            .border_style(Style::default().fg(Color::DarkGray)),
-                    )
-                    .wrap(Wrap { trim: false })
-                    .scroll((scroll, 0)),
-                root[1],
-            );
-            frame.render_widget(
-                Paragraph::new(input_line)
-                    .block(
-                        Block::default()
-                            .borders(Borders::TOP | Borders::BOTTOM)
-                            .border_style(Style::default().fg(Color::DarkGray)),
-                    )
-                    .wrap(Wrap { trim: false }),
-                root[2],
-            );
-            frame.render_widget(
-                Paragraph::new(help_lines).wrap(Wrap { trim: false }),
-                root[3],
-            );
-        })?;
+        )?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -333,7 +284,13 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
             continue;
         }
         match key.code {
-            KeyCode::Esc => break,
+            KeyCode::Esc => {
+                if resume_picker.take().is_some() {
+                    messages.push("system: resume cancelled".into());
+                    continue;
+                }
+                break;
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if ctrl_c_armed {
                     break;
@@ -386,7 +343,18 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                 ctrl_c_armed = false;
             }
             KeyCode::Up => {
-                if !file_suggestions.is_empty() {
+                if let Some(picker) = resume_picker.as_mut() {
+                    picker.selected = picker.selected.saturating_sub(1);
+                    upsert_resume_picker_message(&mut messages, picker);
+                    continue;
+                }
+                if input.is_empty()
+                    && latest_pending_approval_id.is_some()
+                    && file_suggestions.is_empty()
+                    && slash_suggestions.is_empty()
+                {
+                    selected_approval_choice = selected_approval_choice.saturating_sub(1);
+                } else if !file_suggestions.is_empty() {
                     selected_file_suggestion = selected_file_suggestion.saturating_sub(1);
                 } else if !slash_suggestions.is_empty() {
                     selected_slash_suggestion = selected_slash_suggestion.saturating_sub(1);
@@ -395,7 +363,22 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                 }
             }
             KeyCode::Down => {
-                if !file_suggestions.is_empty()
+                if let Some(picker) = resume_picker.as_mut() {
+                    if picker.selected + 1 < picker.sessions.len() {
+                        picker.selected += 1;
+                    }
+                    upsert_resume_picker_message(&mut messages, picker);
+                    continue;
+                }
+                if input.is_empty()
+                    && latest_pending_approval_id.is_some()
+                    && file_suggestions.is_empty()
+                    && slash_suggestions.is_empty()
+                {
+                    if selected_approval_choice < 2 {
+                        selected_approval_choice += 1;
+                    }
+                } else if !file_suggestions.is_empty()
                     && selected_file_suggestion + 1 < file_suggestions.len()
                 {
                     selected_file_suggestion += 1;
@@ -413,12 +396,63 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
             KeyCode::PageDown => {
                 scroll = scroll.saturating_add(8);
             }
+            KeyCode::Char('1') if input.is_empty() && latest_pending_approval_id.is_some() => {
+                ctrl_c_armed = false;
+                let approval_id = latest_pending_approval_id.take().unwrap();
+                let response = submit_approval_resolution(&client, approval_id, true).await?;
+                messages.push(format_approval_resolution(response));
+                status = fetch_status(&client).await?;
+                if status.pending_approval_count > 0 {
+                    let approvals = list_pending_approvals(&client).await?;
+                    latest_pending_approval_id = latest_approval_id(&approvals);
+                    latest_pending_approval = approvals.pending.first().cloned();
+                    selected_approval_choice = 0;
+                } else {
+                    latest_pending_approval = None;
+                }
+            }
+            KeyCode::Char('2') if input.is_empty() && latest_pending_approval_id.is_some() => {
+                ctrl_c_armed = false;
+                current_permission_mode = PermissionMode::FullTrust;
+                let approval_id = latest_pending_approval_id.take().unwrap();
+                let response = submit_approval_resolution(&client, approval_id, true).await?;
+                messages.push(format!(
+                    "{}\nmode: full-trust for this session",
+                    format_approval_resolution(response)
+                ));
+                status = fetch_status(&client).await?;
+                if status.pending_approval_count > 0 {
+                    let approvals = list_pending_approvals(&client).await?;
+                    latest_pending_approval_id = latest_approval_id(&approvals);
+                    latest_pending_approval = approvals.pending.first().cloned();
+                    selected_approval_choice = 0;
+                } else {
+                    latest_pending_approval = None;
+                }
+            }
+            KeyCode::Char('3') if input.is_empty() && latest_pending_approval_id.is_some() => {
+                ctrl_c_armed = false;
+                let approval_id = latest_pending_approval_id.take().unwrap();
+                let response = submit_approval_resolution(&client, approval_id, false).await?;
+                messages.push(format_approval_resolution(response));
+                status = fetch_status(&client).await?;
+                if status.pending_approval_count > 0 {
+                    let approvals = list_pending_approvals(&client).await?;
+                    latest_pending_approval_id = latest_approval_id(&approvals);
+                    latest_pending_approval = approvals.pending.first().cloned();
+                    selected_approval_choice = 0;
+                } else {
+                    latest_pending_approval = None;
+                }
+            }
             KeyCode::Char('a') if input.is_empty() && latest_pending_approval_id.is_some() => {
                 ctrl_c_armed = false;
                 let approval_id = latest_pending_approval_id.take().unwrap();
                 let response = submit_approval_resolution(&client, approval_id, true).await?;
                 messages.push(format_approval_resolution(response));
                 status = fetch_status(&client).await?;
+                latest_pending_approval = None;
+                selected_approval_choice = 0;
             }
             KeyCode::Char('d') if input.is_empty() && latest_pending_approval_id.is_some() => {
                 ctrl_c_armed = false;
@@ -426,11 +460,61 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                 let response = submit_approval_resolution(&client, approval_id, false).await?;
                 messages.push(format_approval_resolution(response));
                 status = fetch_status(&client).await?;
+                latest_pending_approval = None;
+                selected_approval_choice = 0;
             }
             KeyCode::Enter => {
                 ctrl_c_armed = false;
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     input.insert('\n');
+                    continue;
+                }
+                if let Some(picker) = resume_picker.take() {
+                    if let Some(selected) = picker.sessions.get(picker.selected) {
+                        active_session_id = selected.session_id.clone();
+                        current_permission_mode = selected.permission_mode;
+                        messages.push(format!(
+                            "system: switched session to {}",
+                            selected.session_id
+                        ));
+                    } else {
+                        messages.push("system: no session selected".into());
+                    }
+                    continue;
+                }
+                if input.is_empty() && latest_pending_approval_id.is_some() {
+                    let approval_id = latest_pending_approval_id.take().unwrap();
+                    match selected_approval_choice {
+                        0 => {
+                            let response =
+                                submit_approval_resolution(&client, approval_id, true).await?;
+                            messages.push(format_approval_resolution(response));
+                        }
+                        1 => {
+                            current_permission_mode = PermissionMode::FullTrust;
+                            let response =
+                                submit_approval_resolution(&client, approval_id, true).await?;
+                            messages.push(format!(
+                                "{}\nmode: full-trust for this session",
+                                format_approval_resolution(response)
+                            ));
+                        }
+                        _ => {
+                            let response =
+                                submit_approval_resolution(&client, approval_id, false).await?;
+                            messages.push(format_approval_resolution(response));
+                        }
+                    }
+                    status = fetch_status(&client).await?;
+                    if status.pending_approval_count > 0 {
+                        let approvals = list_pending_approvals(&client).await?;
+                        latest_pending_approval_id = latest_approval_id(&approvals);
+                        latest_pending_approval = approvals.pending.first().cloned();
+                    } else {
+                        latest_pending_approval_id = None;
+                        latest_pending_approval = None;
+                    }
+                    selected_approval_choice = 0;
                     continue;
                 }
                 if let Some(path) = file_suggestions.get(selected_file_suggestion) {
@@ -503,9 +587,11 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                     ));
                     continue;
                 }
-                if prompt == "/approval" || prompt == "/approvals" {
+                if prompt == "/pending" {
                     let approvals = list_pending_approvals(&client).await?;
                     latest_pending_approval_id = latest_approval_id(&approvals);
+                    latest_pending_approval = approvals.pending.first().cloned();
+                    selected_approval_choice = 0;
                     messages.push(format!(
                         "system: pending approvals\n{}",
                         format_pending_approvals(approvals)
@@ -513,17 +599,114 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                     status = fetch_status(&client).await?;
                     continue;
                 }
+                if prompt == "/approve" || prompt == "/deny" {
+                    let approved = prompt == "/approve";
+                    let approvals = list_pending_approvals(&client).await?;
+                    latest_pending_approval_id = latest_approval_id(&approvals);
+                    latest_pending_approval = approvals.pending.first().cloned();
+                    selected_approval_choice = 0;
+                    if let Some(id) = latest_pending_approval_id.as_deref() {
+                        replace_input_buffer_text(
+                            &mut input,
+                            &format!("/{} {id}", if approved { "approve" } else { "deny" }),
+                        );
+                        messages.push(format!(
+                            "system: pending approvals\n{}\n\nsystem: staged /{} {id} (press Enter to confirm, or edit id)",
+                            format_pending_approvals(approvals),
+                            if approved { "approve" } else { "deny" }
+                        ));
+                    } else {
+                        messages.push("system: no pending approvals".into());
+                    }
+                    status = fetch_status(&client).await?;
+                    continue;
+                }
+                if prompt == "/trace" {
+                    let default_trace = status
+                        .latest_trace_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    if default_trace.is_empty() {
+                        messages.push(
+                            "system: trace guide\nno recent trace id found. usage: /trace <trace_id> [run_id]"
+                                .into(),
+                        );
+                    } else {
+                        replace_input_buffer_text(&mut input, &format!("/trace {default_trace}"));
+                        messages.push(format!(
+                            "system: trace guide\nstaged /trace {default_trace} (press Enter to query, or append run id)"
+                        ));
+                    }
+                    continue;
+                }
+                if let Some(mode) = parse_approval_mode_slash(&prompt) {
+                    if let Some(mode) = mode {
+                        current_permission_mode = mode;
+                        messages.push(format!(
+                            "system: approval mode set to {}",
+                            format_permission_mode(mode)
+                        ));
+                    } else {
+                        messages.push(format!(
+                            "system: approval mode is {}\nusage: /approval <default|auto|full-trust>",
+                            format_permission_mode(current_permission_mode)
+                        ));
+                    }
+                    continue;
+                }
+                if prompt.starts_with("/approval ") {
+                    messages.push(
+                        "system: invalid approval mode\nusage: /approval <default|auto|full-trust>"
+                            .into(),
+                    );
+                    continue;
+                }
                 if let Some((approved, approval_id)) = parse_approval_slash(&prompt) {
                     let response =
                         submit_approval_resolution(&client, approval_id, approved).await?;
                     messages.push(format_approval_resolution(response));
                     latest_pending_approval_id = None;
+                    latest_pending_approval = None;
+                    selected_approval_choice = 0;
                     status = fetch_status(&client).await?;
                     continue;
                 }
-                if let Some(limit) = parse_resume_slash(&prompt) {
-                    messages.push(load_latest_transcript(&client, limit).await?);
-                    status = fetch_status(&client).await?;
+                if prompt == "/resume" {
+                    let sessions = workspace_sessions(&client, &workspace_text).await?;
+                    if sessions.is_empty() {
+                        messages.push("system: no sessions in current workspace".into());
+                        continue;
+                    }
+                    let picker = ResumePickerState {
+                        sessions,
+                        selected: 0,
+                    };
+                    upsert_resume_picker_message(&mut messages, &picker);
+                    resume_picker = Some(picker);
+                    continue;
+                }
+                if prompt.starts_with("/resume ") {
+                    messages.push(
+                        "system: /resume in TUI no longer accepts a limit; use plain /resume"
+                            .into(),
+                    );
+                    continue;
+                }
+                if prompt == "/new" {
+                    let session = resolve_session(
+                        &client,
+                        &workspace,
+                        current_permission_mode,
+                        SessionResolveStrategy::CreateNew,
+                    )
+                    .await?;
+                    active_session_id = session.session_id.clone();
+                    current_permission_mode = session.permission_mode;
+                    messages.push(format!(
+                        "system: created and switched to {}",
+                        session.session_id
+                    ));
                     continue;
                 }
                 if let Some((trace_id, run_id)) = parse_trace_slash(&prompt) {
@@ -531,31 +714,115 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                     messages.push(format_trace_response(response));
                     continue;
                 }
-                let references = parse_file_references(&prompt);
-                if !references.is_empty() {
-                    messages.push(format_file_references(&references));
+                let file_refs = resolve_prompt_file_references(&prompt, &file_index);
+                if !file_refs.references.is_empty() {
+                    messages.push(format_file_references(&file_refs.references));
                 }
-                messages.push(format!("user: {prompt}"));
+                if !file_refs.unresolved.is_empty() {
+                    messages.push(format!(
+                        "system: unresolved file references\n{}",
+                        file_refs.unresolved.join("\n")
+                    ));
+                }
+                let pending_block_start = messages.len();
+                if !prompt.trim().is_empty() {
+                    messages.push(format!("> {prompt}"));
+                }
                 current_stage = "streaming".into();
-                messages.push(format!("system: stage={current_stage}"));
-                match submit_exec(&client, prompt, PermissionMode::Default).await {
+                messages.push("process: running".into());
+                messages.push("Considering... (0s)".into());
+                let no_file_suggestions: &[String] = &[];
+                let no_slash_suggestions: &[SlashCommandHint] = &[];
+                draw_tui(
+                    terminal,
+                    &status,
+                    &workspace,
+                    &current_stage,
+                    latest_pending_approval_id.as_deref(),
+                    latest_pending_approval.as_ref(),
+                    selected_approval_choice,
+                    &messages,
+                    &input,
+                    scroll,
+                    ctrl_c_armed,
+                    no_file_suggestions,
+                    0,
+                    no_slash_suggestions,
+                    0,
+                    model_config_wizard.as_ref(),
+                )?;
+                let run_started_at = std::time::Instant::now();
+                let exec_future = submit_exec_for_session(
+                    &client,
+                    active_session_id.clone(),
+                    file_refs.rewritten_prompt.clone(),
+                );
+                tokio::pin!(exec_future);
+                let exec_result = loop {
+                    tokio::select! {
+                        result = &mut exec_future => break result,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                            if let Some(last) = messages.last_mut() {
+                                *last = format_considering_line(run_started_at.elapsed().as_secs());
+                            }
+                            draw_tui(
+                                terminal,
+                                &status,
+                                &workspace,
+                                &current_stage,
+                                latest_pending_approval_id.as_deref(),
+                                latest_pending_approval.as_ref(),
+                                selected_approval_choice,
+                                &messages,
+                                &input,
+                                scroll,
+                                ctrl_c_armed,
+                                no_file_suggestions,
+                                0,
+                                no_slash_suggestions,
+                                0,
+                                model_config_wizard.as_ref(),
+                            )?;
+                        }
+                    }
+                };
+                match exec_result {
                     Ok(response) => {
                         current_stage = format!("{:?}", response.completed.stage);
                         let trace_id = response.completed.trace_id.to_string();
-                        messages.push(format!(
-                            "assistant: {}\n\n{}",
-                            response.completed.final_text,
-                            format_exec_summary(&response)
-                        ));
+                        let run_elapsed = run_started_at.elapsed();
+                        messages.truncate(pending_block_start);
                         match query_trace(&client, trace_id, None).await {
-                            Ok(trace) => messages.push(format_trace_timeline(&trace)),
-                            Err(error) => {
-                                messages.push(format!("trace timeline unavailable: {error:#}"))
+                            Ok(trace) => {
+                                let tool_outputs = load_run_tool_outputs(
+                                    &client,
+                                    response.completed.session_id.clone(),
+                                    response.completed.run_id.clone(),
+                                )
+                                .await
+                                .unwrap_or_default();
+                                messages.push(format_friendly_turn_report(
+                                    &prompt,
+                                    &response,
+                                    Some(&trace),
+                                    &tool_outputs,
+                                    run_elapsed,
+                                ))
                             }
+                            Err(error) => messages.push(
+                                format_friendly_turn_report(
+                                    &prompt,
+                                    &response,
+                                    None,
+                                    &[],
+                                    run_elapsed,
+                                ) + &format!("\ntrace timeline unavailable: {error:#}"),
+                            ),
                         }
                     }
                     Err(error) => {
                         current_stage = "failed".into();
+                        messages.truncate(pending_block_start);
                         messages.push(format!("error: {error:#}"));
                     }
                 }
@@ -563,6 +830,11 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
                 if status.pending_approval_count > 0 {
                     let approvals = list_pending_approvals(&client).await?;
                     latest_pending_approval_id = latest_approval_id(&approvals);
+                    latest_pending_approval = approvals.pending.first().cloned();
+                    selected_approval_choice = 0;
+                } else {
+                    latest_pending_approval_id = None;
+                    latest_pending_approval = None;
                 }
             }
             KeyCode::Char(value) => {
@@ -577,6 +849,154 @@ async fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> 
             messages.drain(0..keep_from);
         }
     }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    status: &DaemonStatus,
+    workspace: &Path,
+    current_stage: &str,
+    latest_pending_approval_id: Option<&str>,
+    latest_pending_approval: Option<&PendingApprovalSummary>,
+    selected_approval_choice: usize,
+    messages: &[String],
+    input: &InputBuffer,
+    scroll: u16,
+    ctrl_c_armed: bool,
+    file_suggestions: &[String],
+    selected_file_suggestion: usize,
+    slash_suggestions: &[SlashCommandHint],
+    selected_slash_suggestion: usize,
+    model_config_wizard: Option<&ModelConfigWizard>,
+) -> anyhow::Result<()> {
+    let welcome_left = tui_welcome_left(
+        status,
+        workspace.display().to_string(),
+        current_stage,
+        latest_pending_approval_id,
+    );
+    let welcome_right = tui_welcome_right(messages.last().map(String::as_str));
+    let message_lines = tui_message_lines(messages);
+    let approval_lines = tui_approval_card_lines(latest_pending_approval, selected_approval_choice);
+    let input_line = tui_input_line(
+        input.as_str(),
+        input.cursor(),
+        model_config_wizard.map(ModelConfigWizard::input_placeholder),
+    );
+    let help_lines = tui_bottom_hints(
+        input.before_cursor(),
+        ctrl_c_armed,
+        file_suggestions,
+        selected_file_suggestion,
+        slash_suggestions,
+        selected_slash_suggestion,
+        model_config_wizard,
+    );
+
+    terminal.draw(|frame| {
+        let root = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(12),
+                Constraint::Min(3),
+                Constraint::Length(3),
+                Constraint::Length(7),
+            ])
+            .split(frame.area());
+
+        let welcome_block = Block::default()
+            .title(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("Unio v{}", env!("CARGO_PKG_VERSION")),
+                    Style::default()
+                        .fg(tui_accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tui_accent()));
+        let welcome_inner = welcome_block.inner(root[0]);
+        frame.render_widget(welcome_block, root[0]);
+
+        let welcome_columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(welcome_inner);
+        frame.render_widget(
+            Paragraph::new(welcome_left)
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false }),
+            welcome_columns[0],
+        );
+        frame.render_widget(
+            Paragraph::new(welcome_right)
+                .block(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .border_style(Style::default().fg(tui_accent())),
+                )
+                .wrap(Wrap { trim: false }),
+            welcome_columns[1],
+        );
+        if let Some(approval_lines) = approval_lines {
+            let body = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(9)])
+                .split(root[1]);
+            frame.render_widget(
+                Paragraph::new(message_lines.clone())
+                    .block(
+                        Block::default()
+                            .borders(Borders::TOP)
+                            .border_style(Style::default().fg(Color::DarkGray)),
+                    )
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll, 0)),
+                body[0],
+            );
+            frame.render_widget(
+                Paragraph::new(approval_lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::TOP)
+                            .border_style(Style::default().fg(tui_accent())),
+                    )
+                    .wrap(Wrap { trim: false }),
+                body[1],
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(message_lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::TOP)
+                            .border_style(Style::default().fg(Color::DarkGray)),
+                    )
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll, 0)),
+                root[1],
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(input_line)
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP | Borders::BOTTOM)
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                )
+                .wrap(Wrap { trim: false }),
+            root[2],
+        );
+        frame.render_widget(
+            Paragraph::new(help_lines).wrap(Wrap { trim: false }),
+            root[3],
+        );
+    })?;
 
     Ok(())
 }
@@ -648,7 +1068,8 @@ fn tui_welcome_right(recent: Option<&str>) -> Vec<Line<'static>> {
         ]),
         Line::from("  Run /skills to inspect discovered skills."),
         Line::from("  Run /model to configure or switch the active provider."),
-        Line::from("  Use /approval, then a or d, to resolve pending tool requests."),
+        Line::from("  Run /approval to view or set approval mode."),
+        Line::from("  Run /pending, then a or d, to resolve pending tool requests."),
         Line::from(Span::styled(
             "  ------------------------------------------------------------",
             Style::default().fg(tui_accent()),
@@ -673,23 +1094,216 @@ fn tui_message_lines(messages: &[String]) -> Vec<Line<'static>> {
     messages
         .iter()
         .flat_map(|message| {
-            let style = if message.starts_with("user:") {
-                Style::default().fg(Color::White)
-            } else if message.starts_with("assistant:") {
-                Style::default().fg(tui_accent())
-            } else if message.starts_with("error:") {
-                Style::default().fg(Color::Red)
-            } else {
-                tui_muted()
-            };
-            let mut lines = message
-                .lines()
-                .map(|line| Line::from(Span::styled(line.to_string(), style)))
-                .collect::<Vec<_>>();
+            let mut lines = message.lines().map(styled_message_line).collect::<Vec<_>>();
             lines.push(Line::from(""));
             lines
         })
         .collect()
+}
+
+fn tui_approval_card_lines(
+    approval: Option<&PendingApprovalSummary>,
+    selected_choice: usize,
+) -> Option<Vec<Line<'static>>> {
+    let approval = approval?;
+    let args: serde_json::Value =
+        serde_json::from_str(&approval.call_arguments_json).unwrap_or(serde_json::Value::Null);
+
+    let (title, target, preview) = approval_card_content(&approval.tool_name, &args);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(target, tui_muted())),
+    ];
+
+    if let Some(preview) = preview {
+        lines.push(Line::from(Span::styled(
+            "----------------------------------------------",
+            tui_muted(),
+        )));
+        for line in preview.lines().take(8) {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("Do you want to continue? ({})", approval.approval_id),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(approval_choice_line(0, selected_choice, "1. Yes"));
+    lines.push(approval_choice_line(
+        1,
+        selected_choice,
+        "2. Yes, allow all edits during this session",
+    ));
+    lines.push(approval_choice_line(2, selected_choice, "3. No"));
+    Some(lines)
+}
+
+fn approval_choice_line(index: usize, selected: usize, text: &str) -> Line<'static> {
+    let marker = if index == selected { "> " } else { "  " };
+    let style = if index == selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        tui_muted()
+    };
+    Line::from(vec![
+        Span::styled(marker.to_string(), Style::default().fg(tui_accent())),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+fn approval_card_content(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> (String, String, Option<String>) {
+    match tool_name {
+        "write" => {
+            let path = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown file")
+                .to_string();
+            let content = args
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(|text| text.to_string());
+            ("Create file".into(), path, content)
+        }
+        "edit" => {
+            let path = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown file")
+                .to_string();
+            let old_text = args
+                .get("old_text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let new_text = args
+                .get("new_text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let preview = if old_text.is_empty() && new_text.is_empty() {
+                None
+            } else {
+                Some(format!("- {old_text}\n+ {new_text}"))
+            };
+            ("Edit file".into(), path, preview)
+        }
+        "bash" => {
+            let command = args
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown command")
+                .to_string();
+            ("Run shell command".into(), command, None)
+        }
+        other => (
+            format!("Run tool `{other}`"),
+            approval_target_from_args(args),
+            None,
+        ),
+    }
+}
+
+fn approval_target_from_args(args: &serde_json::Value) -> String {
+    args.as_object()
+        .map(|object| {
+            object
+                .iter()
+                .take(2)
+                .map(|(k, v)| {
+                    format!(
+                        "{k}={}",
+                        shorten_middle(v.to_string().trim_matches('"'), 30)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "request".into())
+}
+
+fn styled_message_line(line: &str) -> Line<'static> {
+    if let Some(prompt) = line.strip_prefix("> ") {
+        return Line::from(vec![
+            Span::styled("> ", Style::default().fg(tui_accent())),
+            Span::styled(prompt.to_string(), Style::default().fg(Color::White)),
+        ]);
+    }
+    if line == "process" || line.starts_with("result") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(tui_accent()),
+        ));
+    }
+    if line.starts_with("  - ") {
+        let step = line.trim_start_matches("  - ");
+        let dot_color = status_color_for_step(step);
+        return status_dot_line("", step, dot_color, false);
+    }
+    if line.starts_with("    └ ") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    if line.starts_with("Worked for") {
+        return status_dot_line("", line, Color::Yellow, false);
+    }
+    let style = if line.starts_with("user:") {
+        Style::default().fg(Color::White)
+    } else if line.starts_with("assistant:") {
+        Style::default().fg(tui_accent())
+    } else if line.starts_with("error:") {
+        Style::default().fg(Color::Red)
+    } else {
+        tui_muted()
+    };
+    Line::from(Span::styled(line.to_string(), style))
+}
+
+fn status_dot_line(prefix: &str, text: &str, dot_color: Color, emphasize: bool) -> Line<'static> {
+    let mut text_style = Style::default().fg(Color::White);
+    if emphasize {
+        text_style = text_style.add_modifier(Modifier::BOLD);
+    }
+    Line::from(vec![
+        Span::styled("● ", Style::default().fg(dot_color)),
+        Span::styled(prefix.to_string(), text_style),
+        Span::styled(text.to_string(), text_style),
+    ])
+}
+
+fn status_color_for_step(step: &str) -> Color {
+    let lowered = step.to_ascii_lowercase();
+    if lowered.contains("[failed]") || lowered.contains("[denied]") {
+        Color::Red
+    } else if lowered.contains("[approval]") {
+        Color::Yellow
+    } else if lowered.contains("[running]") {
+        Color::Blue
+    } else if lowered.contains("[completed]") {
+        Color::Green
+    } else {
+        tui_accent()
+    }
+}
+
+fn format_considering_line(seconds: u64) -> String {
+    format!("Considering... ({seconds}s)")
 }
 
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
@@ -813,6 +1427,13 @@ fn previous_char_boundary(value: &str, cursor: usize) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+fn replace_input_buffer_text(input: &mut InputBuffer, value: &str) {
+    input.clear();
+    for ch in value.chars() {
+        input.insert(ch);
+    }
+}
+
 fn tui_input_line(input: &str, cursor: usize, placeholder: Option<String>) -> Line<'static> {
     if input.is_empty() {
         return Line::from(vec![
@@ -908,6 +1529,12 @@ struct SlashCommandHint {
     usage: &'static str,
 }
 
+#[derive(Clone)]
+struct ResumePickerState {
+    sessions: Vec<SessionSummary>,
+    selected: usize,
+}
+
 const SLASH_COMMAND_HINTS: &[SlashCommandHint] = &[
     SlashCommandHint {
         name: "/skills",
@@ -919,19 +1546,23 @@ const SLASH_COMMAND_HINTS: &[SlashCommandHint] = &[
     },
     SlashCommandHint {
         name: "/approval",
-        usage: "review approvals",
+        usage: "[mode] approval policy",
     },
     SlashCommandHint {
-        name: "/approvals",
+        name: "/pending",
         usage: "review approvals",
     },
     SlashCommandHint {
         name: "/resume",
-        usage: "[n] recent transcript",
+        usage: "switch workspace session",
+    },
+    SlashCommandHint {
+        name: "/new",
+        usage: "create and switch session",
     },
     SlashCommandHint {
         name: "/trace",
-        usage: "<id> [run] inspect events",
+        usage: "guided trace lookup",
     },
     SlashCommandHint {
         name: "/refresh",
@@ -939,11 +1570,11 @@ const SLASH_COMMAND_HINTS: &[SlashCommandHint] = &[
     },
     SlashCommandHint {
         name: "/approve",
-        usage: "<id> approve",
+        usage: "guided approve",
     },
     SlashCommandHint {
         name: "/deny",
-        usage: "<id> deny",
+        usage: "guided deny",
     },
     SlashCommandHint {
         name: "/update",
@@ -1030,7 +1661,7 @@ fn tui_default_hints() -> Vec<Line<'static>> {
             Span::styled("for file paths", tui_muted()),
             Span::raw("          "),
             Span::styled("a/d ", Style::default().fg(Color::White)),
-            Span::styled("approve or deny latest approval", tui_muted()),
+            Span::styled("approve prompt: up/down select, enter confirm", tui_muted()),
         ]),
         Line::from(vec![
             Span::styled("up/down ", Style::default().fg(Color::White)),
@@ -1320,6 +1951,95 @@ impl FileReferenceIndex {
             .map(|candidate| candidate.entry.path.clone())
             .collect()
     }
+
+    fn resolve_reference(&self, raw_query: &str) -> Option<String> {
+        let normalized = normalize_reference_query(raw_query);
+        if normalized.is_empty() {
+            return None;
+        }
+
+        for query in reference_query_candidates(&normalized) {
+            let candidates = self.suggestions(&format!("@{query}"));
+            if let Some(first) = candidates.first() {
+                return Some(first.clone());
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedPromptReferences {
+    references: Vec<String>,
+    unresolved: Vec<String>,
+    rewritten_prompt: String,
+}
+
+fn resolve_prompt_file_references(
+    input: &str,
+    index: &FileReferenceIndex,
+) -> ResolvedPromptReferences {
+    let mut rewritten = input.to_string();
+    let mut references = Vec::new();
+    let mut unresolved = Vec::new();
+
+    for token in parse_file_references(input) {
+        let clean = token.trim_matches(|c: char| matches!(c, ',' | '，' | '。' | ':' | '：' | ';'));
+        if let Some(resolved) = index.resolve_reference(clean) {
+            references.push(resolved.clone());
+            rewritten = rewritten.replace(&format!("@{token}"), &format!("@{resolved}"));
+        } else {
+            unresolved.push(format!("@{clean}"));
+        }
+    }
+    references.sort();
+    references.dedup();
+    unresolved.sort();
+    unresolved.dedup();
+    ResolvedPromptReferences {
+        references,
+        unresolved,
+        rewritten_prompt: rewritten,
+    }
+}
+
+fn normalize_reference_query(query: &str) -> String {
+    query
+        .trim()
+        .trim_start_matches('@')
+        .trim_start_matches('.')
+        .replace('\\', "/")
+        .to_lowercase()
+}
+
+fn reference_query_candidates(query: &str) -> Vec<String> {
+    let mut candidates = vec![query.to_string()];
+    if query.contains('-') {
+        candidates.push(query.replace('-', "."));
+        candidates.push(query.replace('-', ""));
+    }
+    if query.contains('_') {
+        candidates.push(query.replace('_', "."));
+    }
+    let alnum = query
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '/' || ch == '.' {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(longest) = alnum.iter().max_by_key(|part| part.len()) {
+        candidates.push(longest.clone());
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 #[derive(Clone)]
@@ -1512,17 +2232,21 @@ fn tui_help_text() -> String {
         "Slash commands:",
         "/skills         list discovered skills",
         "/model          show active model provider",
-        "/approval       show pending approvals",
-        "/approve <id>   approve a pending request",
-        "/deny <id>      deny a pending request",
-        "/resume [n]     show latest transcript, optionally limited",
-        "/trace <id> [run_id] show trace events, optionally filtered",
+        "/approval [mode] show or set approval mode",
+        "/pending        show pending approvals",
+        "/approve [id]   guided or direct approve",
+        "/deny [id]      guided or direct deny",
+        "/resume         pick and switch workspace session",
+        "/new            create and switch to a new session",
+        "/trace [id] [run_id] guided or direct trace query",
         "/refresh        reload daemon status",
         "/update         check configured latest version",
         "/quit           exit Unio",
         "",
         "Keys:",
-        "a / d           approve or deny latest pending request when input is empty",
+        "up/down + enter approve prompt selection when input is empty",
+        "1 / 2 / 3       direct approve prompt shortcuts",
+        "a / d           legacy quick approve/deny for latest pending request",
         "left/right      move inside the input line",
         "home/end        move to start or end",
         "ctrl+w          delete previous word",
@@ -1550,11 +2274,13 @@ fn format_file_references(references: &[String]) -> String {
 fn print_slash_help() {
     println!("/skills    list discovered skills");
     println!("/model     configure and select model");
-    println!("/resume [n] show latest session transcript");
-    println!("/approval  show pending approvals");
-    println!("/trace <id> [run_id] show trace events");
-    println!("/approve <id> approve a pending tool request");
-    println!("/deny <id>    deny a pending tool request");
+    println!("/approval [default|auto|full-trust] show or set approval mode");
+    println!("/pending   show pending approvals");
+    println!("/resume switch session in TUI; CLI subcommand still prints transcript");
+    println!("/new create and switch to a fresh session");
+    println!("/trace [id] [run_id] guided or direct trace query");
+    println!("/approve [id] guided or direct approve");
+    println!("/deny [id]    guided or direct deny");
     println!("/update    check for updates");
     println!("?          show this help");
 }
@@ -1778,6 +2504,29 @@ fn parse_model_slash(input: &str) -> Option<()> {
     (input.trim() == "/model").then_some(())
 }
 
+fn parse_approval_mode_slash(input: &str) -> Option<Option<PermissionMode>> {
+    let trimmed = input.trim();
+    if trimmed == "/approval" {
+        return Some(None);
+    }
+    let mode = trimmed.strip_prefix("/approval ")?;
+    let mode = match mode.trim() {
+        "default" => PermissionMode::Default,
+        "auto" => PermissionMode::Auto,
+        "full-trust" => PermissionMode::FullTrust,
+        _ => return None,
+    };
+    Some(Some(mode))
+}
+
+fn format_permission_mode(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::Auto => "auto",
+        PermissionMode::FullTrust => "full-trust",
+    }
+}
+
 fn is_supported_model_provider(provider: &str) -> bool {
     matches!(
         provider,
@@ -1807,13 +2556,24 @@ async fn submit_exec(
     permission_mode: PermissionMode,
 ) -> anyhow::Result<ExecTurnResponse> {
     let workspace = std::env::current_dir()?;
-    let session = resolve_session(&client, &workspace, permission_mode).await?;
+    let session = resolve_session(
+        &client,
+        &workspace,
+        permission_mode,
+        SessionResolveStrategy::CreateNew,
+    )
+    .await?;
+    submit_exec_for_session(client, session.session_id, prompt).await
+}
+
+async fn submit_exec_for_session(
+    client: &DaemonClient,
+    session_id: SessionId,
+    prompt: String,
+) -> anyhow::Result<ExecTurnResponse> {
     Ok(client
         .post(format!("{}/exec", client.base_url))
-        .json(&ExecTurnRequest {
-            session_id: session.session_id,
-            prompt,
-        })
+        .json(&ExecTurnRequest { session_id, prompt })
         .send()
         .await
         .context("failed to submit exec request to daemon")?
@@ -1831,7 +2591,7 @@ fn print_exec_response(response: &ExecTurnResponse, output: ExecOutputMode) {
     }
     if response.completed.stage == RunStage::WaitingApproval {
         println!(
-            "waiting_approval: use `/approval` or `unio approvals` to review pending approvals"
+            "waiting_approval: use `/pending` or `unio approvals` to review pending approvals"
         );
     }
 }
@@ -1948,30 +2708,6 @@ async fn print_transcript(
     Ok(())
 }
 
-async fn load_latest_transcript(
-    client: &DaemonClient,
-    limit: Option<usize>,
-) -> anyhow::Result<String> {
-    let sessions = client
-        .get(format!("{}/sessions", client.base_url))
-        .send()
-        .await
-        .context("failed to request session list from daemon")?
-        .error_for_status()
-        .context("daemon rejected session list request")?
-        .json::<Vec<SessionSummary>>()
-        .await
-        .context("failed to decode session list response")?;
-    let Some(session) = sessions.first() else {
-        return Ok("system: no sessions".into());
-    };
-    let response = load_transcript(client, session.session_id.clone(), limit).await?;
-    Ok(format!(
-        "system: latest transcript\n{}",
-        format_transcript_response(response)
-    ))
-}
-
 async fn load_transcript(
     client: &DaemonClient,
     session_id: unio_core::SessionId,
@@ -2012,6 +2748,35 @@ fn format_transcript_response(response: LoadTranscriptResponse) -> String {
         lines.push(format_transcript_message(message));
     }
     lines.join("\n")
+}
+
+fn format_resume_picker(state: &ResumePickerState) -> String {
+    let mut lines = vec![
+        "system: resume session".to_string(),
+        "Use Up/Down to select, Enter to switch, Esc to cancel.".to_string(),
+    ];
+    for (index, session) in state.sessions.iter().enumerate() {
+        let marker = if index == state.selected { ">" } else { " " };
+        lines.push(format!(
+            "{marker} {}  {}",
+            session.session_id,
+            session.updated_at.to_rfc3339()
+        ));
+    }
+    lines.join("\n")
+}
+
+fn upsert_resume_picker_message(messages: &mut Vec<String>, state: &ResumePickerState) {
+    let picker = format_resume_picker(state);
+    if let Some(last) = messages.last_mut() {
+        if last.starts_with(
+            "system: resume session\nUse Up/Down to select, Enter to switch, Esc to cancel.",
+        ) {
+            *last = picker;
+            return;
+        }
+    }
+    messages.push(picker);
 }
 
 fn format_transcript_message(message: &TranscriptMessage) -> String {
@@ -2061,6 +2826,114 @@ async fn run_model_config() -> anyhow::Result<()> {
     run_models().await
 }
 
+async fn run_guided_approval_resolution(approved: bool) -> anyhow::Result<()> {
+    let client = daemon_client(true).await?;
+    let approvals = list_pending_approvals(&client).await?;
+    if approvals.pending.is_empty() {
+        println!("no pending approvals");
+        return Ok(());
+    }
+    println!("{}", format_pending_approvals(approvals.clone()));
+    let default_id = approvals.pending[0].approval_id.to_string();
+    let selected = prompt_with_default("approval_id", &default_id)?;
+    resolve_approval(&client, selected, approved).await
+}
+
+async fn run_guided_trace_query() -> anyhow::Result<()> {
+    let client = daemon_client(true).await?;
+    let status = fetch_status(&client).await?;
+    let default_trace = status
+        .latest_trace_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let trace_id = prompt_with_default("trace_id", &default_trace)?;
+    if trace_id.trim().is_empty() {
+        anyhow::bail!("trace_id is required");
+    }
+    let run_id = prompt_with_default("run_id (optional)", "")?;
+    let run_id = if run_id.trim().is_empty() {
+        None
+    } else {
+        Some(run_id)
+    };
+    run_trace(trace_id, run_id).await
+}
+
+async fn run_approval_mode_config(mode: Option<PermissionMode>) -> anyhow::Result<()> {
+    let client = daemon_client(true).await?;
+    let workspace = std::env::current_dir()?;
+    if let Some(mode) = mode {
+        let session = resolve_session(
+            &client,
+            &workspace,
+            mode,
+            SessionResolveStrategy::ReuseWorkspaceLatest,
+        )
+        .await?;
+        println!(
+            "approval_mode: {}",
+            format_permission_mode(session.permission_mode)
+        );
+    } else {
+        let current_mode = fetch_workspace_permission_mode(&client, &workspace)
+            .await?
+            .unwrap_or_default();
+        println!("approval_mode: {}", format_permission_mode(current_mode));
+        println!("usage: /approval <default|auto|full-trust>");
+    }
+    Ok(())
+}
+
+async fn run_new_session() -> anyhow::Result<()> {
+    let client = daemon_client(true).await?;
+    let workspace = std::env::current_dir()?;
+    let session = resolve_session(
+        &client,
+        &workspace,
+        PermissionMode::Default,
+        SessionResolveStrategy::CreateNew,
+    )
+    .await?;
+    println!(
+        "new_session: {}\t{}\t{}",
+        session.session_id, session.title, session.workspace_root
+    );
+    Ok(())
+}
+
+async fn fetch_workspace_permission_mode(
+    client: &DaemonClient,
+    workspace: &Path,
+) -> anyhow::Result<Option<PermissionMode>> {
+    let workspace = workspace.to_string_lossy().to_string();
+    let sessions = workspace_sessions(client, &workspace).await?;
+    Ok(sessions
+        .into_iter()
+        .next()
+        .map(|session| session.permission_mode))
+}
+
+async fn workspace_sessions(
+    client: &DaemonClient,
+    workspace_root: &str,
+) -> anyhow::Result<Vec<SessionSummary>> {
+    let sessions = client
+        .get(format!("{}/sessions", client.base_url))
+        .send()
+        .await
+        .context("failed to request session list from daemon")?
+        .error_for_status()
+        .context("daemon rejected session list request")?
+        .json::<Vec<SessionSummary>>()
+        .await
+        .context("failed to decode session list response")?;
+    Ok(sessions
+        .into_iter()
+        .filter(|session| session.workspace_root == workspace_root)
+        .collect())
+}
+
 async fn fetch_models(client: &DaemonClient) -> anyhow::Result<ModelsStatus> {
     Ok(client
         .get(format!("{}/models", client.base_url))
@@ -2095,7 +2968,16 @@ fn write_finished_model_config(config_update: FinishedModelConfig) -> anyhow::Re
     let path = paths.root.join("config.toml");
     let mut config = read_unio_config(&path)?;
     config_update.apply_to_config(&mut config)?;
-    std::fs::write(&path, toml::to_string_pretty(&config)?)?;
+    std::fs::write(&path, toml::to_string_pretty(&config)?).map_err(|error| {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!(
+                "permission denied writing {}. Configure model via env vars or run with file write permission.",
+                path.display()
+            )
+        } else {
+            error.into()
+        }
+    })?;
     Ok(path)
 }
 
@@ -2157,7 +3039,16 @@ fn write_prompted_model_config() -> anyhow::Result<PathBuf> {
         set_optional_model_config_value(&mut config, "api_key", api_key)?;
     }
 
-    std::fs::write(&path, toml::to_string_pretty(&config)?)?;
+    std::fs::write(&path, toml::to_string_pretty(&config)?).map_err(|error| {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!(
+                "permission denied writing {}. Configure model via env vars or run with file write permission.",
+                path.display()
+            )
+        } else {
+            error.into()
+        }
+    })?;
     Ok(path)
 }
 
@@ -2385,6 +3276,7 @@ fn format_trace_response(response: TraceLookupResponse) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn format_trace_timeline(response: &TraceLookupResponse) -> String {
     if response.events.is_empty() {
         return format!("timeline: {} has no events", response.trace_id);
@@ -2415,6 +3307,193 @@ fn format_trace_timeline(response: &TraceLookupResponse) -> String {
         lines.push(line);
     }
     lines.join("\n")
+}
+
+fn format_friendly_turn_report(
+    prompt: &str,
+    response: &ExecTurnResponse,
+    trace: Option<&TraceLookupResponse>,
+    tool_outputs: &[(String, String)],
+    wall_elapsed: Duration,
+) -> String {
+    let mut lines = Vec::new();
+    if !prompt.trim().is_empty() {
+        lines.push(format!("> {prompt}"));
+    }
+    lines.push(String::new());
+    let steps = trace
+        .map(|t| build_tool_steps(t, &response.completed.run_id))
+        .unwrap_or_default();
+    if steps.is_empty() {
+        lines.push("process".into());
+        let timeline = fallback_timeline_lines(response);
+        if timeline.is_empty() {
+            lines.push("  - [running] Running".into());
+        } else {
+            lines.extend(timeline.into_iter().map(|line| format!("  - {line}")));
+        }
+    } else {
+        for step in steps {
+            lines.push(format!("  - [{}] {}", step.status, step.tool));
+            if let Some(output) = tool_outputs
+                .iter()
+                .find(|(name, _)| name == &step.tool)
+                .map(|(_, content)| content)
+            {
+                lines.push(format!("    └ {}", summarize_single_line(output)));
+            }
+            lines.push(format!(
+                "    └ Took {}",
+                format_seconds(step.duration_seconds)
+            ));
+        }
+    }
+
+    if !is_waiting_approval_response(response) {
+        lines.push(String::new());
+        lines.push("result".into());
+        for line in response.completed.final_text.lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "Worked for {}",
+        worked_for_text(response, trace, wall_elapsed)
+    ));
+    lines.join("\n")
+}
+
+fn is_waiting_approval_response(response: &ExecTurnResponse) -> bool {
+    matches!(response.completed.stage, RunStage::WaitingApproval)
+        || response
+            .completed
+            .events
+            .iter()
+            .any(|event| event == "approval.requested" || event == "tool.approval_required")
+}
+
+#[derive(Debug, Clone)]
+struct ToolStep {
+    tool: String,
+    status: String,
+    duration_seconds: i64,
+}
+
+fn build_tool_steps(trace: &TraceLookupResponse, run_id: &RunId) -> Vec<ToolStep> {
+    let mut started: std::collections::HashMap<String, _> = std::collections::HashMap::new();
+    let mut steps = Vec::new();
+    for event in trace.events.iter().filter(|event| &event.run_id == run_id) {
+        if event.kind == "tool.started" {
+            started.insert(event.message.clone(), event.recorded_at);
+            continue;
+        }
+        let status = match event.kind.as_str() {
+            "tool.completed" => "completed",
+            "tool.denied" => "denied",
+            "approval.requested" | "tool.approval_required" => "approval",
+            "tool.failed" => "failed",
+            _ => continue,
+        };
+        let tool = event
+            .message
+            .split(':')
+            .next()
+            .unwrap_or(event.message.as_str())
+            .trim()
+            .to_string();
+        let duration_seconds = started
+            .get(&tool)
+            .map(|start| (event.recorded_at - *start).num_seconds().max(0))
+            .unwrap_or(0);
+        steps.push(ToolStep {
+            tool,
+            status: status.into(),
+            duration_seconds,
+        });
+    }
+    steps
+}
+
+fn summarize_single_line(content: &str) -> String {
+    let first = content.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        "ok".into()
+    } else {
+        shorten_middle(first, 90)
+    }
+}
+
+fn format_seconds(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
+async fn load_run_tool_outputs(
+    client: &DaemonClient,
+    session_id: SessionId,
+    run_id: RunId,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let transcript = load_transcript(client, session_id, Some(80)).await?;
+    Ok(transcript
+        .messages
+        .into_iter()
+        .filter_map(|message| match message {
+            TranscriptMessage::Tool {
+                run_id: message_run_id,
+                tool_name,
+                content,
+                ..
+            } if message_run_id == run_id => Some((tool_name, content)),
+            _ => None,
+        })
+        .collect())
+}
+
+fn fallback_timeline_lines(response: &ExecTurnResponse) -> Vec<String> {
+    response
+        .completed
+        .events
+        .iter()
+        .map(|event| friendly_event_line(event, ""))
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn worked_for_text(
+    response: &ExecTurnResponse,
+    trace: Option<&TraceLookupResponse>,
+    wall_elapsed: Duration,
+) -> String {
+    let wall_secs = wall_elapsed.as_secs();
+    let wall_display_secs = if wall_secs == 0 && wall_elapsed.as_millis() > 0 {
+        1
+    } else {
+        wall_secs
+    };
+
+    let trace_secs = trace
+        .and_then(|trace| {
+            let run_id = &response.completed.run_id;
+            let mut times = trace
+                .events
+                .iter()
+                .filter(|event| &event.run_id == run_id)
+                .map(|event| event.recorded_at)
+                .collect::<Vec<_>>();
+            if times.is_empty() {
+                return None;
+            }
+            times.sort();
+            Some((times[times.len() - 1] - times[0]).num_seconds().max(0) as u64)
+        })
+        .unwrap_or(0);
+
+    format_seconds(std::cmp::max(trace_secs, wall_display_secs) as i64)
 }
 
 async fn run_tool(
@@ -2599,7 +3678,7 @@ async fn submit_approval_resolution(
     approval_id: String,
     approved: bool,
 ) -> anyhow::Result<ApprovalResolveResponse> {
-    Ok(client
+    let response = client
         .post(format!("{}/approvals/resolve", client.base_url))
         .json(&ApprovalResolveRequest {
             approval_id: unio_core::ApprovalId::from_string(approval_id),
@@ -2607,7 +3686,8 @@ async fn submit_approval_resolution(
         })
         .send()
         .await
-        .context("failed to submit approval resolution to daemon")?
+        .context("failed to submit approval resolution to daemon")?;
+    Ok(response
         .error_for_status()
         .context("daemon rejected approval resolution")?
         .json::<ApprovalResolveResponse>()
@@ -2625,6 +3705,10 @@ fn format_approval_resolution(response: ApprovalResolveResponse) -> String {
     }
     if let Some(content) = response.content {
         lines.push(content);
+    }
+    if let Some(follow_up_text) = response.follow_up_text {
+        lines.push("result".into());
+        lines.push(follow_up_text);
     }
     lines.join("\n")
 }
@@ -2685,12 +3769,14 @@ async fn resolve_session(
     client: &DaemonClient,
     workspace: &std::path::Path,
     permission_mode: PermissionMode,
+    strategy: SessionResolveStrategy,
 ) -> anyhow::Result<SessionSummary> {
     let response = client
         .post(format!("{}/sessions/resolve", client.base_url))
         .json(&ResolveSessionRequest {
             workspace_root: workspace.to_string_lossy().to_string(),
             permission_mode,
+            strategy,
         })
         .send()
         .await
@@ -2818,17 +3904,20 @@ mod tests {
     use super::{
         active_file_reference_query, apply_model_switch_to_config, complete_file_reference,
         configured_latest_version, format_approval_history, format_daemon_status,
-        format_exec_summary, format_file_references, format_models_status,
-        format_pending_approvals, format_tool_execution_response, format_trace_response,
-        format_trace_timeline, format_transcript_response, format_update_status,
-        latest_approval_id, parse_approval_slash, parse_file_references, parse_model_slash,
-        parse_resume_slash, parse_trace_slash, print_exec_response, scan_file_reference_paths,
-        shorten_middle, skill_source_label, slash_command_suggestions, tui_bottom_hints,
-        tui_help_text, tui_input_line, tui_message_lines, tui_welcome_right, Cli, CommandSpec,
-        ExecOutputMode, FileReferenceIndex, InputBuffer, ModelConfigWizard, ModelSwitch,
+        format_exec_summary, format_file_references, format_friendly_turn_report,
+        format_models_status, format_pending_approvals, format_tool_execution_response,
+        format_trace_response, format_trace_timeline, format_transcript_response,
+        format_update_status, latest_approval_id, parse_approval_mode_slash, parse_approval_slash,
+        parse_file_references, parse_model_slash, parse_resume_slash, parse_trace_slash,
+        print_exec_response, reference_query_candidates, resolve_prompt_file_references,
+        scan_file_reference_paths, shorten_middle, skill_source_label, slash_command_suggestions,
+        tui_bottom_hints, tui_help_text, tui_input_line, tui_message_lines, tui_welcome_right, Cli,
+        CommandSpec, ExecOutputMode, FileReferenceIndex, InputBuffer, ModelConfigWizard,
+        ModelSwitch,
     };
     use chrono::Utc;
     use clap::Parser;
+    use std::time::Duration;
     use tempfile::tempdir;
     use unio_core::{ApprovalId, RunId, SessionId, TraceId};
     use unio_protocol::{
@@ -2863,6 +3952,24 @@ mod tests {
             Some((false, "approval_2".into()))
         );
         assert_eq!(parse_approval_slash("/approve "), None);
+    }
+
+    #[test]
+    fn parses_approval_mode_slash_commands() {
+        assert_eq!(parse_approval_mode_slash("/approval"), Some(None));
+        assert_eq!(
+            parse_approval_mode_slash("/approval default"),
+            Some(Some(PermissionMode::Default))
+        );
+        assert_eq!(
+            parse_approval_mode_slash("/approval auto"),
+            Some(Some(PermissionMode::Auto))
+        );
+        assert_eq!(
+            parse_approval_mode_slash("/approval full-trust"),
+            Some(Some(PermissionMode::FullTrust))
+        );
+        assert_eq!(parse_approval_mode_slash("/approval nope"), None);
     }
 
     #[test]
@@ -3102,6 +4209,7 @@ mod tests {
                 approval_id: ApprovalId::from_string("approval_1"),
                 tool_call_id: "tool_call_1".into(),
                 tool_name: "write".into(),
+                call_arguments_json: "{\"path\":\"README.md\",\"content\":\"hi\"}".into(),
                 reason: "requires approval".into(),
                 workspace_root: "F:/repo".into(),
                 requested_at: Utc::now(),
@@ -3116,7 +4224,8 @@ mod tests {
         let help = tui_help_text();
 
         assert!(help.contains("/approval"));
-        assert!(help.contains("/trace <id> [run_id]"));
+        assert!(help.contains("/pending"));
+        assert!(help.contains("/trace [id] [run_id]"));
         assert!(help.contains("/skills"));
         assert!(help.contains("@path"));
         assert!(help.contains("ctrl+c twice"));
@@ -3136,6 +4245,28 @@ mod tests {
         );
         assert!(parse_file_references("email a@b.com").is_empty());
         assert_eq!(parse_file_references("@README.md"), vec!["README.md"]);
+    }
+
+    #[test]
+    fn resolves_typos_like_dot_cargo_lock_to_cargo_lock() {
+        let index = FileReferenceIndex::from_paths(vec![
+            "Cargo.lock".into(),
+            "README.md".into(),
+            "crates/protocol/src/lib.rs".into(),
+        ]);
+        let resolved = resolve_prompt_file_references("介绍 @.cargo-lock 的内容", &index);
+
+        assert_eq!(resolved.references, vec!["Cargo.lock".to_string()]);
+        assert!(resolved.unresolved.is_empty());
+        assert!(resolved.rewritten_prompt.contains("@Cargo.lock"));
+    }
+
+    #[test]
+    fn query_candidates_include_dot_dash_variants() {
+        let variants = reference_query_candidates("cargo-lock");
+        assert!(variants.contains(&"cargo-lock".to_string()));
+        assert!(variants.contains(&"cargo.lock".to_string()));
+        assert!(variants.contains(&"cargolock".to_string()));
     }
 
     #[test]
@@ -3370,6 +4501,8 @@ mod tests {
     #[test]
     fn hybrid_message_lines_style_roles_as_text_rows() {
         let lines = tui_message_lines(&[
+            "> create readme".into(),
+            "  - Tool completed write README.md".into(),
             "user: hello".into(),
             "assistant: hi".into(),
             "error: no".into(),
@@ -3380,6 +4513,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        assert!(text.contains("> create readme"));
+        assert!(text.contains("Tool completed write README.md"));
         assert!(text.contains("user: hello"));
         assert!(text.contains("assistant: hi"));
         assert!(text.contains("error: no"));
@@ -3425,6 +4560,157 @@ mod tests {
         assert!(timeline.contains("Tool completed read"));
         assert!(timeline.contains("Context budget checkpoint"));
         assert!(timeline.contains("ratio=0.850"));
+    }
+
+    #[test]
+    fn friendly_turn_report_includes_input_process_result_and_duration() {
+        let now = Utc::now();
+        let response = ExecTurnResponse {
+            started: TurnStarted {
+                session_id: SessionId::from_string("session_1"),
+                conversation_id: unio_protocol::ConversationId::new(),
+                run_id: RunId::from_string("run_1"),
+                stage: RunStage::Streaming,
+            },
+            completed: TurnCompleted {
+                session_id: SessionId::from_string("session_1"),
+                run_id: RunId::from_string("run_1"),
+                trace_id: TraceId::from_string("trace_1"),
+                stage: RunStage::Completed,
+                final_text: "created README.md".into(),
+                events: vec!["tool.completed".into()],
+                provider: "mock".into(),
+                model: "mock".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                context_ratio: 0.1,
+            },
+        };
+        let trace = TraceLookupResponse {
+            trace_id: TraceId::from_string("trace_1"),
+            events: vec![
+                TraceEventRecord {
+                    run_id: RunId::from_string("run_1"),
+                    kind: "tool.started".into(),
+                    message: "write".into(),
+                    token_usage: None,
+                    recorded_at: now,
+                },
+                TraceEventRecord {
+                    run_id: RunId::from_string("run_1"),
+                    kind: "tool.completed".into(),
+                    message: "write".into(),
+                    token_usage: None,
+                    recorded_at: now + chrono::Duration::seconds(2),
+                },
+            ],
+        };
+
+        let output = format_friendly_turn_report(
+            "创建 README",
+            &response,
+            Some(&trace),
+            &[],
+            Duration::from_secs(2),
+        );
+
+        assert!(!output.contains("goal:"));
+        assert!(output.contains("[completed] write"));
+        assert!(output.contains("Took 2s"));
+        assert!(output.contains("result"));
+        assert!(output.contains("created README.md"));
+        assert!(output.contains("Worked for 2s"));
+    }
+
+    #[test]
+    fn friendly_turn_report_omits_goal_when_prompt_is_empty() {
+        let response = ExecTurnResponse {
+            started: TurnStarted {
+                session_id: SessionId::from_string("session_1"),
+                conversation_id: unio_protocol::ConversationId::new(),
+                run_id: RunId::from_string("run_1"),
+                stage: RunStage::Streaming,
+            },
+            completed: TurnCompleted {
+                session_id: SessionId::from_string("session_1"),
+                run_id: RunId::from_string("run_1"),
+                trace_id: TraceId::from_string("trace_1"),
+                stage: RunStage::Completed,
+                final_text: "ok".into(),
+                events: vec!["tool.completed".into()],
+                provider: "mock".into(),
+                model: "mock".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                context_ratio: 0.1,
+            },
+        };
+
+        let output =
+            format_friendly_turn_report("", &response, None, &[], Duration::from_millis(500));
+
+        assert!(!output.contains("goal:"));
+        assert!(!output.contains("\n> "));
+        assert!(output.contains("process"));
+        assert!(output.contains("result"));
+        assert!(output.contains("Worked for 1s"));
+    }
+
+    #[test]
+    fn friendly_turn_report_hides_result_when_waiting_approval() {
+        let now = Utc::now();
+        let response = ExecTurnResponse {
+            started: TurnStarted {
+                session_id: SessionId::from_string("session_1"),
+                conversation_id: unio_protocol::ConversationId::new(),
+                run_id: RunId::from_string("run_1"),
+                stage: RunStage::Streaming,
+            },
+            completed: TurnCompleted {
+                session_id: SessionId::from_string("session_1"),
+                run_id: RunId::from_string("run_1"),
+                trace_id: TraceId::from_string("trace_1"),
+                stage: RunStage::WaitingApproval,
+                final_text: "Tool execution is waiting for approval: approval_1".into(),
+                events: vec!["approval.requested".into()],
+                provider: "mock".into(),
+                model: "mock".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                context_ratio: 0.1,
+            },
+        };
+        let trace = TraceLookupResponse {
+            trace_id: TraceId::from_string("trace_1"),
+            events: vec![
+                TraceEventRecord {
+                    run_id: RunId::from_string("run_1"),
+                    kind: "tool.started".into(),
+                    message: "bash".into(),
+                    token_usage: None,
+                    recorded_at: now,
+                },
+                TraceEventRecord {
+                    run_id: RunId::from_string("run_1"),
+                    kind: "approval.requested".into(),
+                    message: "bash: approval_1".into(),
+                    token_usage: None,
+                    recorded_at: now + chrono::Duration::seconds(1),
+                },
+            ],
+        };
+
+        let output = format_friendly_turn_report(
+            "有多少个文件",
+            &response,
+            Some(&trace),
+            &[],
+            Duration::from_secs(1),
+        );
+
+        assert!(output.contains("[approval] bash"));
+        assert!(!output.contains("\nresult\n"));
+        assert!(!output.contains("Tool execution is waiting for approval"));
     }
 
     #[test]

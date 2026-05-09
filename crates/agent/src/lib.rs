@@ -198,12 +198,13 @@ impl RootAgentRuntime<ResolvedProvider> {
             });
         }
         let messages = model_messages_from_runtime(&runtime);
+        let tools = model_tool_definitions_for_runtime(&self.tools);
         let response = self
             .provider
             .complete(ModelRequest {
                 model: Some(self.provider.summary().model.clone()),
                 messages,
-                tools: self.tools.definitions().to_vec(),
+                tools,
             })
             .await?;
 
@@ -301,9 +302,7 @@ fn model_messages_from_runtime(runtime: &AgentRuntime) -> Vec<ModelMessage> {
     let mut messages = Vec::new();
     messages.push(ModelMessage {
         role: "system".into(),
-        content:
-            "You are Unio, a local coding agent. Use tools when needed and keep answers concise."
-                .into(),
+        content: system_prompt_with_environment(),
     });
     for message in &runtime.history {
         match message {
@@ -330,6 +329,32 @@ fn model_messages_from_runtime(runtime: &AgentRuntime) -> Vec<ModelMessage> {
     messages
 }
 
+fn model_tool_definitions_for_runtime(registry: &ToolRegistry) -> Vec<unio_tools::ToolDefinition> {
+    let mut tools = registry.definitions().to_vec();
+    if let Some(bash) = tools.iter_mut().find(|tool| tool.name == "bash") {
+        bash.description = format!("{}. {}", bash.description, bash_tool_environment_hint());
+    }
+    tools
+}
+
+fn system_prompt_with_environment() -> String {
+    format!(
+        "You are Unio, a local coding agent. Use tools when needed and keep answers concise. {}",
+        bash_tool_environment_hint()
+    )
+}
+
+fn bash_tool_environment_hint() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Environment: Windows. For `bash` tool, generate Windows-compatible commands (cmd/PowerShell style), avoid Unix-only syntax, and when a tool failure is returned, adapt the command in the next step (ReAct retry)."
+    }
+    #[cfg(not(windows))]
+    {
+        "Environment: Unix-like shell. For `bash` tool, generate POSIX-compatible commands, and when a tool failure is returned, adapt the command in the next step (ReAct retry)."
+    }
+}
+
 #[async_trait]
 impl RootAgent for RootAgentRuntime<ResolvedProvider> {
     async fn run(&self, runtime: AgentRuntime) -> anyhow::Result<AgentOutcome> {
@@ -350,11 +375,13 @@ fn context_ratio(input_tokens: usize, output_tokens: usize) -> f32 {
 mod tests {
     use unio_core::{RunId, SessionId};
     use unio_protocol::TranscriptMessage;
+    use unio_tools::ToolRegistry;
 
     use super::{
-        create_plan_spec, model_messages_from_runtime, sub_agent_task_from_plan, AgentRuntime,
-        MockSkillAgent, MockSubAgent, PlanSpec, PlanStep, PlanStepStatus, SkillAgent,
-        SkillAgentStatus, SkillAgentTask, StepExecutor, SubAgent, SubAgentStatus,
+        create_plan_spec, model_messages_from_runtime, model_tool_definitions_for_runtime,
+        sub_agent_task_from_plan, AgentRuntime, MockSkillAgent, MockSubAgent, PlanSpec, PlanStep,
+        PlanStepStatus, SkillAgent, SkillAgentStatus, SkillAgentTask, StepExecutor, SubAgent,
+        SubAgentStatus,
     };
 
     #[test]
@@ -398,6 +425,15 @@ mod tests {
 
         assert!(messages.iter().any(|message| message.content == "previous"));
         assert_eq!(messages.last().unwrap().content, "next");
+        assert!(messages[0].content.contains("Environment:"));
+    }
+
+    #[test]
+    fn bash_tool_description_is_environment_aware() {
+        let tools = model_tool_definitions_for_runtime(&ToolRegistry::with_builtin_tools());
+        let bash = tools.into_iter().find(|tool| tool.name == "bash").unwrap();
+
+        assert!(bash.description.contains("Environment:"));
     }
 
     #[test]

@@ -8,10 +8,27 @@ observability.
 
 Implemented capabilities:
 
-- `unio exec` creates or resumes a workspace session through the daemon.
+- `unio exec` creates a new workspace session through the daemon by default.
 - The root agent can call a model provider configured from environment
   variables or `~/.unio/config.toml` and receive model tool calls.
 - `/model` configures or switches the persistent model settings from the CLI.
+- `/approval` shows or sets the current interactive approval mode.
+- `/pending` lists pending approval requests in the interactive terminal.
+- Root slash commands support guided usage for approval resolution and trace
+  lookup when arguments are omitted.
+- Interactive slash commands include `/resume` to switch to an existing
+  workspace session and `/new` to create and switch to a new session.
+- The interactive terminal surface clears submitted prompts from the editing
+  area immediately while the agent run continues.
+- Completed interactive turns now render as a friendly execution block with
+  `> user input`, `process`, `result`, and `Worked for` duration lines, plus
+  colored status dots for process rows.
+- Approval-required states now render a dedicated review card with request
+  preview and keyboard selection (`Up/Down` + `Enter`), while keeping numeric
+  actions `1/2/3` for approve once, approve with full-trust session switch, or
+  deny.
+- Daemon turn execution now retries once after a tool failure by appending the
+  structured tool failure result back into model context.
 - The mock provider supports deterministic local development.
 - Built-in tools include file, process, planning, and skill execution paths.
 - Tool execution goes through `crates/security` before running.
@@ -20,6 +37,9 @@ Implemented capabilities:
 - Trace records cover model, tool, approval, planning, skill, and context
   events.
 - The mdBook documentation site is available in English and Simplified Chinese.
+- Real-model E2E validation spec and report for ReAct/slash/tools now exist:
+  `docs/real-model-e2e-test-spec.md` and
+  `docs/real-model-e2e-test-report.md`.
 
 ## Documentation Plan
 
@@ -65,13 +85,16 @@ artifacts, and publishes a GitHub Release.
 
 ## Near-Term Work
 
-1. Keep CLI and daemon contracts aligned as commands are added.
-2. Expand tests around approval policy, tool execution, storage, and trace
+1. Fix ReAct continuation quality issues found in real-model E2E runs
+   (tool-only termination and failed recovery in targeted prompts).
+2. Fix slash command behavior gaps found in direct invocation
+   (`/approval <mode>` switching and `/model` direct flow error handling).
+3. Expand and stabilize tests around approval policy, tool execution, storage, and trace
    records.
-3. Keep documentation synchronized with command behavior and release targets.
-4. Add installation details when the first public release artifact is
+4. Keep documentation synchronized with command behavior and release targets.
+5. Add installation details when the first public release artifact is
    available.
-5. Continue improving model provider error reporting and secret handling.
+6. Continue improving model provider error reporting and secret handling.
 
 ## Verification Checklist
 

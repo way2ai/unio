@@ -26,6 +26,9 @@ cargo run -p unio
 - `Shift+Enter` 或 `Ctrl+J` 插入换行。
 - 连续两次 `Ctrl+C` 退出。
 
+提交普通提示后，终端界面会立即清空编辑区，并先把提示移动到消息流中；
+daemon 完成运行后再追加 agent 响应。
+
 ## 模型配置
 
 `/model` slash command 会显示并更新 `~/.unio/config.toml` 中的持久化模型设置。

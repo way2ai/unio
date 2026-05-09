@@ -83,10 +83,25 @@ pub struct SessionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionResolveStrategy {
+    ReuseWorkspaceLatest,
+    CreateNew,
+}
+
+impl Default for SessionResolveStrategy {
+    fn default() -> Self {
+        Self::ReuseWorkspaceLatest
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveSessionRequest {
     pub workspace_root: String,
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    #[serde(default)]
+    pub strategy: SessionResolveStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,17 +200,18 @@ pub struct ToolExecuteResponse {
     pub approval_id: Option<ApprovalId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingApprovalSummary {
     pub approval_id: ApprovalId,
     pub tool_call_id: String,
     pub tool_name: String,
+    pub call_arguments_json: String,
     pub reason: String,
     pub workspace_root: String,
     pub requested_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalListResponse {
     pub pending: Vec<PendingApprovalSummary>,
 }
@@ -212,6 +228,7 @@ pub struct ApprovalResolveResponse {
     pub status: String,
     pub content: Option<String>,
     pub reason: Option<String>,
+    pub follow_up_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

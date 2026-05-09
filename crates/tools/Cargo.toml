@@ -8,6 +8,7 @@ anyhow = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+encoding_rs = "0.8"
 unio-core = { path = "../core" }
 unio-security = { path = "../security" }
 unio-protocol = { path = "../protocol" }
