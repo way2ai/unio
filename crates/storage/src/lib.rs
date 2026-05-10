@@ -91,9 +91,30 @@ impl SqliteSessionStore {
         permission_mode: PermissionMode,
     ) -> anyhow::Result<SessionSummary> {
         let workspace_root = workspace_root.as_ref().to_string_lossy().to_string();
-        if let Some(session) = self.find_by_workspace(&workspace_root)? {
+        if let Some(mut session) = self.find_by_workspace(&workspace_root)? {
+            if session.permission_mode != permission_mode {
+                self.conn.execute(
+                    "update sessions set permission_mode = ?2, updated_at = ?3 where session_id = ?1",
+                    params![
+                        session.session_id.to_string(),
+                        format!("{:?}", permission_mode),
+                        now_utc().to_rfc3339(),
+                    ],
+                )?;
+                session.permission_mode = permission_mode;
+            }
             return Ok(session);
         }
+
+        self.create_session(workspace_root, permission_mode)
+    }
+
+    pub fn create_session(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        permission_mode: PermissionMode,
+    ) -> anyhow::Result<SessionSummary> {
+        let workspace_root = workspace_root.as_ref().to_string_lossy().to_string();
 
         let now = now_utc();
         let record = SessionRecord {
@@ -393,7 +414,20 @@ mod tests {
             .resolve_session(dir.path().join("repo"), PermissionMode::Default)
             .unwrap();
         assert_eq!(session.session_id, same.session_id);
-        assert_eq!(same.permission_mode, PermissionMode::Auto);
+        assert_eq!(same.permission_mode, PermissionMode::Default);
+    }
+
+    #[test]
+    fn creates_new_session_when_requested() {
+        let dir = tempdir().unwrap();
+        let store = SqliteSessionStore::open(dir.path().join("state.db")).unwrap();
+        let first = store
+            .create_session(dir.path().join("repo"), PermissionMode::Default)
+            .unwrap();
+        let second = store
+            .create_session(dir.path().join("repo"), PermissionMode::Default)
+            .unwrap();
+        assert_ne!(first.session_id, second.session_id);
     }
 
     #[test]

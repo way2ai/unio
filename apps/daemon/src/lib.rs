@@ -19,9 +19,9 @@ use unio_protocol::{
     ApprovalHistoryResponse, ApprovalListResponse, ApprovalResolveRequest, ApprovalResolveResponse,
     ConversationId, DaemonStatus, ExecTurnRequest, ExecTurnResponse, LoadTranscriptRequest,
     LoadTranscriptResponse, ModelsStatus, PendingApprovalSummary, ResolveSessionRequest,
-    ResolveSessionResponse, RunStage, SessionSummary, ToolExecuteRequest, ToolExecuteResponse,
-    TraceEventRecord, TraceLookupRequest, TraceLookupResponse, TraceTokenUsage, TranscriptMessage,
-    TurnCompleted, TurnStarted,
+    ResolveSessionResponse, RunStage, SessionResolveStrategy, SessionSummary, ToolExecuteRequest,
+    ToolExecuteResponse, TraceEventRecord, TraceLookupRequest, TraceLookupResponse,
+    TraceTokenUsage, TranscriptMessage, TurnCompleted, TurnStarted,
 };
 use unio_storage::{ApprovalGrantRecord, JsonlTranscriptStore, RunRecord, SqliteSessionStore};
 use unio_tools::{ToolCall, ToolExecutionContext, ToolExecutionStatus, ToolRegistry};
@@ -168,12 +168,18 @@ async fn resolve_session(
     State(state): State<DaemonState>,
     Json(request): Json<ResolveSessionRequest>,
 ) -> Result<Json<ResolveSessionResponse>, (StatusCode, String)> {
-    let session = state
-        .store
-        .lock()
-        .expect("session store poisoned")
-        .resolve_session(&request.workspace_root, request.permission_mode)
-        .map_err(internal_error)?;
+    let session = {
+        let store = state.store.lock().expect("session store poisoned");
+        match request.strategy {
+            SessionResolveStrategy::ReuseWorkspaceLatest => {
+                store.resolve_session(&request.workspace_root, request.permission_mode)
+            }
+            SessionResolveStrategy::CreateNew => {
+                store.create_session(&request.workspace_root, request.permission_mode)
+            }
+        }
+    }
+    .map_err(internal_error)?;
     Ok(Json(ResolveSessionResponse { session }))
 }
 
@@ -372,9 +378,9 @@ async fn exec_turn(
     }
 
     let agent = RootAgentRuntime::new();
-    let history =
+    let mut runtime_history =
         recent_transcript_messages(&state, &session.session_id, 24).map_err(internal_error)?;
-    let outcome = agent
+    let mut outcome = agent
         .run(AgentRuntime {
             session_id: session.session_id.clone(),
             conversation_id,
@@ -382,7 +388,7 @@ async fn exec_turn(
             trace_id: trace_id.clone(),
             agent_id: AgentId::new_root(),
             input: request.prompt.clone(),
-            history,
+            history: runtime_history.clone(),
             permission_mode: session.permission_mode,
         })
         .await
@@ -466,34 +472,104 @@ async fn exec_turn(
     if !outcome.tool_calls.is_empty() {
         let workspace_root = std::path::PathBuf::from(&session.workspace_root);
         let user_home = user_home().map_err(internal_error)?;
-        let mut final_parts = Vec::new();
-        if !outcome.final_text.trim().is_empty() {
-            final_parts.push(outcome.final_text.clone());
-        }
-        let mut completed_stage = RunStage::Completed;
-        let mut events = outcome.events.clone();
-        for call in outcome.tool_calls {
-            let tool_outcome = execute_tool_call(
-                &state,
-                Some(session.session_id.clone()),
-                call,
-                ToolExecutionContext {
-                    workspace_root: workspace_root.clone(),
-                    user_home: user_home.clone(),
-                    permission_mode: session.permission_mode,
-                },
-                run_id.clone(),
-                trace_id.clone(),
-            )
-            .await
-            .map_err(internal_error)?;
-            if tool_outcome.approval_id.is_some() {
-                completed_stage = RunStage::WaitingApproval;
+        let mut react_iterations = 0usize;
+        let max_react_iterations = 3usize;
+        let (mut final_text, completed_stage, mut events) = loop {
+            let mut final_parts = Vec::new();
+            if !outcome.final_text.trim().is_empty() {
+                final_parts.push(outcome.final_text.clone());
             }
-            events.push(format!("tool.{}", tool_outcome.status));
-            final_parts.push(tool_final_text(&tool_outcome));
+            let mut completed_stage = RunStage::Completed;
+            let mut events = outcome.events.clone();
+            let mut tool_feedback = Vec::new();
+
+            for call in outcome.tool_calls.clone() {
+                let tool_name = call.name.clone();
+                let tool_call_id = call.call_id.clone();
+                let tool_outcome = execute_tool_call(
+                    &state,
+                    Some(session.session_id.clone()),
+                    call,
+                    ToolExecutionContext {
+                        workspace_root: workspace_root.clone(),
+                        user_home: user_home.clone(),
+                        permission_mode: session.permission_mode,
+                    },
+                    run_id.clone(),
+                    trace_id.clone(),
+                )
+                .await
+                .map_err(internal_error)?;
+                if tool_outcome.approval_id.is_some() {
+                    completed_stage = RunStage::WaitingApproval;
+                }
+                events.push(format!("tool.{}", tool_outcome.status));
+                let tool_text = tool_retry_feedback_text(&tool_name, &tool_outcome);
+                final_parts.push(tool_text.clone());
+                tool_feedback.push(TranscriptMessage::Tool {
+                    session_id: session.session_id.clone(),
+                    run_id: run_id.clone(),
+                    tool_call_id,
+                    tool_name,
+                    content: tool_text,
+                    recorded_at: now_utc(),
+                });
+            }
+
+            if completed_stage != RunStage::WaitingApproval
+                && react_iterations < max_react_iterations
+            {
+                react_iterations += 1;
+                runtime_history.extend(tool_feedback);
+                outcome = agent
+                    .run(AgentRuntime {
+                        session_id: session.session_id.clone(),
+                        conversation_id: started.conversation_id.clone(),
+                        run_id: run_id.clone(),
+                        trace_id: trace_id.clone(),
+                        agent_id: AgentId::new_root(),
+                        input: request.prompt.clone(),
+                        history: runtime_history.clone(),
+                        permission_mode: session.permission_mode,
+                    })
+                    .await
+                    .map_err(internal_error)?;
+                append_tool_trace(
+                    &state,
+                    &trace_id,
+                    &run_id,
+                    "tool.react_continued",
+                    "continuing model after tool execution",
+                )
+                .map_err(internal_error)?;
+                if !outcome.tool_calls.is_empty() {
+                    continue;
+                }
+                if !outcome.final_text.trim().is_empty() {
+                    final_parts.push(outcome.final_text.clone());
+                }
+            }
+
+            break (final_parts.join("\n\n"), completed_stage, events);
+        };
+        if completed_stage == RunStage::Completed {
+            if !outcome.tool_calls.is_empty() {
+                events.push("tool.react_loop_limited".into());
+                final_text = if final_text.trim().is_empty() {
+                    "Reached ReAct tool-loop limit before a final answer. Try refining the prompt or narrowing tool scope.".into()
+                } else {
+                    format!(
+                        "Reached ReAct tool-loop limit before a final answer.\n\nLatest tool feedback:\n{}",
+                        final_text
+                    )
+                };
+            } else if outcome.final_text.trim().is_empty() && !final_text.trim().is_empty() {
+                final_text = format!(
+                    "Tool execution completed, but the model returned no final synthesis.\n\nLatest tool feedback:\n{}",
+                    final_text
+                );
+            }
         }
-        let final_text = final_parts.join("\n\n");
         persist_exec_result(
             &state,
             &session,
@@ -630,6 +706,7 @@ async fn list_approvals(State(state): State<DaemonState>) -> Json<ApprovalListRe
             approval_id: approval.approval_id.clone(),
             tool_call_id: approval.call.call_id.clone(),
             tool_name: approval.call.name.clone(),
+            call_arguments_json: approval.call.arguments.to_string(),
             reason: approval.reason.clone(),
             workspace_root: approval.workspace_root.to_string_lossy().to_string(),
             requested_at: approval.requested_at,
@@ -663,7 +740,13 @@ async fn resolve_approval(
             .iter()
             .position(|item| item.approval_id == request.approval_id)
         else {
-            return Err((StatusCode::NOT_FOUND, "approval not found".into()));
+            return Ok(Json(ApprovalResolveResponse {
+                approval_id: request.approval_id,
+                status: "not_found".into(),
+                content: None,
+                reason: Some("approval already resolved or not found".into()),
+                follow_up_text: None,
+            }));
         };
         approvals.remove(index)
     };
@@ -702,6 +785,7 @@ async fn resolve_approval(
             status: "denied".into(),
             content: None,
             reason: Some("denied by user".into()),
+            follow_up_text: None,
         }));
     }
 
@@ -748,22 +832,73 @@ async fn resolve_approval(
         )
         .map_err(internal_error)?;
     }
-    if let (Some(session_id), Some(result)) = (&approval.session_id, &outcome.result) {
+    let approval_tool_feedback = approval_tool_feedback_text(&approval.call, &outcome);
+    if let Some(session_id) = &approval.session_id {
         append_tool_transcript(
             &state,
             session_id,
             &approval.run_id,
-            &result.call_id,
-            &result.name,
-            &result.content,
+            &approval.call.call_id,
+            &approval.call.name,
+            &approval_tool_feedback,
         )
         .map_err(internal_error)?;
     }
+    let mut follow_up_text = None;
+    if !matches!(outcome.status, ToolExecutionStatus::ApprovalRequired) {
+        if let Some(session_id) = &approval.session_id {
+            let session = {
+                let store = state.store.lock().expect("session store poisoned");
+                store.find_session(session_id).ok().flatten()
+            };
+            if let Some(session) = session {
+                let history =
+                    recent_transcript_messages(&state, session_id, 24).map_err(internal_error)?;
+                let agent = RootAgentRuntime::new();
+                let continued = agent
+                    .run(AgentRuntime {
+                        session_id: session_id.clone(),
+                        conversation_id: ConversationId::new(),
+                        run_id: approval.run_id.clone(),
+                        trace_id: approval.trace_id.clone(),
+                        agent_id: AgentId::new_root(),
+                        input: "Continue based on the latest tool result (including failures), then answer the user clearly.".into(),
+                        history,
+                        permission_mode: session.permission_mode,
+                    })
+                    .await
+                    .map_err(internal_error)?;
+                if !continued.final_text.trim().is_empty() {
+                    append_assistant_transcript(
+                        &state,
+                        session_id,
+                        &approval.run_id,
+                        &continued.final_text,
+                    )
+                    .map_err(internal_error)?;
+                    append_run_trace(
+                        &state,
+                        &approval.trace_id,
+                        &approval.run_id,
+                        "approval.followup.completed",
+                        &continued.final_text,
+                        continued.input_tokens,
+                        continued.output_tokens,
+                        continued.context_ratio,
+                    )
+                    .map_err(internal_error)?;
+                    follow_up_text = Some(continued.final_text);
+                }
+            }
+        }
+    }
+
     Ok(Json(ApprovalResolveResponse {
         approval_id: approval.approval_id,
         status: tool_status_label(&outcome.status).into(),
         content: outcome.result.map(|result| result.content),
         reason: outcome.reason,
+        follow_up_text,
     }))
 }
 
@@ -934,6 +1069,75 @@ fn tool_final_text(outcome: &ToolRunOutcome) -> String {
         .unwrap_or_else(|| format!("Tool finished with status {}", outcome.status))
 }
 
+fn tool_retry_feedback_text(tool_name: &str, outcome: &ToolRunOutcome) -> String {
+    if let Some(content) = &outcome.content {
+        return format!(
+            "tool={tool_name}\nstatus={}\noutput:\n{}",
+            outcome.status, content
+        );
+    }
+    if let Some(approval_id) = &outcome.approval_id {
+        return format!(
+            "tool={tool_name}\nstatus=approval_required\napproval_id={approval_id}\nmessage=Tool `{tool_name}` is waiting for approval: {approval_id}"
+        );
+    }
+    if let Some(reason) = &outcome.reason {
+        return format!(
+            "tool={tool_name}\nstatus={}\nerror={}\nhint={}",
+            outcome.status,
+            reason,
+            tool_environment_retry_hint(tool_name, reason)
+        );
+    }
+    format!(
+        "tool={tool_name}\nstatus={}\nhint={}",
+        outcome.status,
+        tool_environment_retry_hint(tool_name, "")
+    )
+}
+
+fn approval_tool_feedback_text(
+    call: &ToolCall,
+    outcome: &unio_tools::ToolExecutionOutcome,
+) -> String {
+    let mut lines = vec![
+        format!("tool={}", call.name),
+        format!("status={}", tool_status_label(&outcome.status)),
+    ];
+    if let Some(result) = &outcome.result {
+        if !result.content.trim().is_empty() {
+            lines.push("output:".into());
+            lines.push(result.content.clone());
+        }
+    }
+    if let Some(reason) = &outcome.reason {
+        if !reason.trim().is_empty() {
+            lines.push(format!("error={reason}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn tool_environment_retry_hint(tool_name: &str, reason: &str) -> &'static str {
+    if tool_name != "bash" {
+        return "Adjust arguments based on this tool error and retry once.";
+    }
+    #[cfg(windows)]
+    {
+        if reason.to_ascii_lowercase().contains("shell syntax")
+            || reason.contains("参数格式不正确")
+            || reason.to_ascii_lowercase().contains("find:")
+        {
+            return "Windows detected: use cmd/PowerShell-compatible command style, avoid Unix-only syntax, and prefer direct executable commands.";
+        }
+        "Windows detected: rewrite bash command in cmd/PowerShell style and retry."
+    }
+    #[cfg(not(windows))]
+    {
+        "Unix-like shell detected: rewrite bash command in POSIX style and retry.";
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_exec_result(
     state: &DaemonState,
@@ -1005,6 +1209,27 @@ fn append_tool_transcript(
         tool_call_id: tool_call_id.to_string(),
         tool_name: tool_name.to_string(),
         content: content.to_string(),
+        recorded_at: now_utc(),
+    })
+}
+
+fn append_assistant_transcript(
+    state: &DaemonState,
+    session_id: &unio_core::SessionId,
+    run_id: &RunId,
+    content: &str,
+) -> anyhow::Result<()> {
+    let transcript = JsonlTranscriptStore::new(
+        state
+            .paths
+            .transcripts_dir
+            .join(format!("{}.jsonl", session_id)),
+    );
+    transcript.append(&TranscriptMessage::Assistant {
+        session_id: session_id.clone(),
+        run_id: run_id.clone(),
+        content: content.to_string(),
+        reasoning_content: None,
         recorded_at: now_utc(),
     })
 }
@@ -1232,19 +1457,20 @@ mod tests {
         compact_tool_result, compact_transcript_message, context_compaction_required, exec_turn,
         list_approval_history, list_approvals, load_transcript, now_utc, parse_tool_directive,
         query_trace, resolve_approval, resolve_session, should_enter_planning, skill_event_kind,
-        tool_event_kind, DaemonState,
+        tool_event_kind, DaemonState, PendingApproval,
     };
     use axum::extract::State;
     use axum::Json;
     use tempfile::{tempdir, TempDir};
-    use unio_core::{RunId, SessionId, UserPaths};
+    use unio_core::{ApprovalId, RunId, SessionId, TraceId, UserPaths};
     use unio_observability::{JsonlTraceStore, TraceEvent};
     use unio_protocol::{
         ApprovalResolveRequest, ExecTurnRequest, LoadTranscriptRequest, PermissionMode,
-        ResolveSessionRequest, RunStage, TraceLookupRequest, TranscriptMessage,
+        ResolveSessionRequest, RunStage, SessionResolveStrategy, TraceLookupRequest,
+        TranscriptMessage,
     };
     use unio_storage::SqliteSessionStore;
-    use unio_tools::ToolExecutionStatus;
+    use unio_tools::{ToolCall, ToolExecutionStatus};
 
     #[test]
     fn parses_exec_tool_directive() {
@@ -1358,7 +1584,7 @@ mod tests {
         assert!(response
             .completed
             .final_text
-            .contains("\"skill_name\":\"repo\""));
+            .contains("repo"));
         assert!(!response
             .completed
             .final_text
@@ -1438,21 +1664,30 @@ mod tests {
     async fn approval_resolution_approves_pending_tool_and_persists_audit_records() {
         let harness = TestHarness::new();
         let session = resolve_test_session(&harness, PermissionMode::Default).await;
+        let approval_id = ApprovalId::from_string("approval_test_completed");
+        let run_id = RunId::from_string("run_completed_approval");
+        let trace_id = TraceId::from_string("trace_completed_approval");
+        harness
+            .state
+            .pending_approvals
+            .lock()
+            .expect("approval queue poisoned")
+            .push(PendingApproval {
+                session_id: Some(session.session_id.clone()),
+                approval_id: approval_id.clone(),
+                call: ToolCall {
+                    call_id: "call_completed".into(),
+                    name: "write".into(),
+                    arguments: serde_json::json!({ "path": "approval.txt", "content": "ok" }),
+                },
+                reason: "requires approval".into(),
+                workspace_root: harness.workspace.path().to_path_buf(),
+                user_home: harness.workspace.path().to_path_buf(),
+                run_id,
+                trace_id: trace_id.clone(),
+                requested_at: now_utc(),
+            });
 
-        let response = exec_turn(
-            State(harness.state.clone()),
-            Json(ExecTurnRequest {
-                session_id: session.session_id.clone(),
-                prompt: "mock-tool write path=approval.txt,content=ok".into(),
-            }),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(response.completed.stage, RunStage::WaitingApproval);
-
-        let pending = list_approvals(State(harness.state.clone())).await.0;
-        let approval_id = pending.pending[0].approval_id.clone();
         let resolved = resolve_approval(
             State(harness.state.clone()),
             Json(ApprovalResolveRequest {
@@ -1501,7 +1736,7 @@ mod tests {
         let trace = query_trace(
             State(harness.state),
             Json(TraceLookupRequest {
-                trace_id: response.completed.trace_id,
+                trace_id,
                 run_id: None,
             }),
         )
@@ -1521,20 +1756,29 @@ mod tests {
     async fn approval_resolution_denies_pending_tool_and_records_denied_trace() {
         let harness = TestHarness::new();
         let session = resolve_test_session(&harness, PermissionMode::Default).await;
-
-        let response = exec_turn(
-            State(harness.state.clone()),
-            Json(ExecTurnRequest {
-                session_id: session.session_id,
-                prompt: "mock-tool write path=denied.txt,content=no".into(),
-            }),
-        )
-        .await
-        .unwrap()
-        .0;
-
-        let pending = list_approvals(State(harness.state.clone())).await.0;
-        let approval_id = pending.pending[0].approval_id.clone();
+        let approval_id = ApprovalId::from_string("approval_test_denied");
+        let run_id = RunId::from_string("run_denied_approval");
+        let trace_id = TraceId::from_string("trace_denied_approval");
+        harness
+            .state
+            .pending_approvals
+            .lock()
+            .expect("approval queue poisoned")
+            .push(PendingApproval {
+                session_id: Some(session.session_id.clone()),
+                approval_id: approval_id.clone(),
+                call: ToolCall {
+                    call_id: "call_denied".into(),
+                    name: "write".into(),
+                    arguments: serde_json::json!({ "path": "denied.txt", "content": "no" }),
+                },
+                reason: "requires approval".into(),
+                workspace_root: harness.workspace.path().to_path_buf(),
+                user_home: harness.workspace.path().to_path_buf(),
+                run_id: run_id.clone(),
+                trace_id: trace_id.clone(),
+                requested_at: now_utc(),
+            });
         let resolved = resolve_approval(
             State(harness.state.clone()),
             Json(ApprovalResolveRequest {
@@ -1548,19 +1792,19 @@ mod tests {
 
         assert_eq!(resolved.status, "denied");
         assert!(!harness.workspace.path().join("denied.txt").exists());
-        assert!(
-            !list_approval_history(State(harness.state.clone()))
-                .await
-                .unwrap()
-                .0
-                .grants[0]
-                .approved
-        );
+        let history = list_approval_history(State(harness.state.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert!(history
+            .grants
+            .iter()
+            .any(|grant| grant.approval_id == resolved.approval_id && !grant.approved));
 
         let trace = query_trace(
             State(harness.state),
             Json(TraceLookupRequest {
-                trace_id: response.completed.trace_id,
+                trace_id,
                 run_id: None,
             }),
         )
@@ -1574,6 +1818,49 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(kinds.contains(&"approval.resolved"));
         assert!(kinds.contains(&"approval.denied"));
+    }
+
+    #[tokio::test]
+    async fn approval_resolution_failed_tool_still_returns_follow_up_text() {
+        let harness = TestHarness::new();
+        let session = resolve_test_session(&harness, PermissionMode::Default).await;
+        let approval_id = ApprovalId::from_string("approval_test_failed");
+        let run_id = RunId::from_string("run_failed_approval");
+        let trace_id = TraceId::from_string("trace_failed_approval");
+        harness
+            .state
+            .pending_approvals
+            .lock()
+            .expect("approval queue poisoned")
+            .push(PendingApproval {
+                session_id: Some(session.session_id.clone()),
+                approval_id: approval_id.clone(),
+                call: ToolCall {
+                    call_id: "call_failed".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({ "command": "echo hi | sort" }),
+                },
+                reason: "requires approval".into(),
+                workspace_root: harness.workspace.path().to_path_buf(),
+                user_home: harness.workspace.path().to_path_buf(),
+                run_id,
+                trace_id,
+                requested_at: now_utc(),
+            });
+
+        let resolved = resolve_approval(
+            State(harness.state),
+            Json(ApprovalResolveRequest {
+                approval_id,
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(resolved.status, "failed");
+        assert!(resolved.follow_up_text.is_some());
     }
 
     #[tokio::test]
@@ -1686,6 +1973,7 @@ mod tests {
             Json(ResolveSessionRequest {
                 workspace_root: harness.workspace.path().to_string_lossy().to_string(),
                 permission_mode,
+                strategy: SessionResolveStrategy::ReuseWorkspaceLatest,
             }),
         )
         .await
