@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Added a chapter-level bilingual technical project report under `arti_doc/`,
+  with a report specification in `docs/arti-doc-report-spec.md`.
 - Added persistent real-model configuration through `~/.unio/config.toml`,
   with environment variables still taking precedence and mock fallback
   preserved when real provider credentials are missing.

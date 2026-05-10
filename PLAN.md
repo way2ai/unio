@@ -36,6 +36,10 @@ The active documentation set is:
   customization.
 - `docs/documentation-refresh.md`: specification for the current documentation
   refresh.
+- `docs/arti-doc-report-spec.md`: specification for the bilingual technical
+  review report under `arti_doc/`.
+- `arti_doc/`: chapter-level bilingual technical review report covering project
+  overview, architecture, functional modules, usage, and technical introduction.
 
 The mdBook page structure is synchronized across languages:
 
